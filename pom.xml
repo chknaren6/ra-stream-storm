@@ -8,6 +8,13 @@
   <name>ra-stream</name>
   <url>http://maven.apache.org</url>
   <dependencies>
+  <dependency>
+          <groupId>org.apache.storm</groupId>
+          <artifactId>storm-client</artifactId>
+          <version>2.6.1</version>
+      </dependency>
+
+      
     <dependency>
       <groupId>junit</groupId>
       <artifactId>junit</artifactId>
