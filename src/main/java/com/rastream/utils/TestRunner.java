@@ -1,0 +1,42 @@
+package com.rastream.utils;
+
+import com.rastream.dag.StreamApplication;
+import com.rastream.dag.Task;
+import com.rastream.partitioning.PartitionScheme;
+import com.rastream.partitioning.Subgraph;
+import com.rastream.partitioning.SubgraphPartitioner;
+
+import java.util.List;
+
+public class TestRunner {
+    public static void main(String[] args) {
+
+        System.out.println("=== Testing Phase 2: Subgraph Partitioning ===");
+
+        StreamApplication wc = new StreamApplication("WordCount");
+
+        Task v1t1 = new Task(1, 1, "reader");
+        Task v1t2 = new Task(1, 2, "reader");
+        Task v2t1 = new Task(2, 1, "split");
+        Task v2t2 = new Task(2, 2, "split");
+        Task v3t1 = new Task(3, 1, "count");
+        Task v3t2 = new Task(3, 2, "count");
+
+        for (Task t : List.of(v1t1, v1t2, v2t1, v2t2, v3t1, v3t2))
+            wc.addTask(t);
+
+        wc.connect(v1t1, v2t1).setTupleTransmissionRate(100.0);
+        wc.connect(v1t2, v2t2).setTupleTransmissionRate(120.0);
+        wc.connect(v2t1, v3t1).setTupleTransmissionRate(80.0);
+        wc.connect(v2t2, v3t2).setTupleTransmissionRate(90.0);
+
+        SubgraphPartitioner partitioner = new SubgraphPartitioner();
+        PartitionScheme result = partitioner.partition(wc, 2);
+
+        System.out.println("\n--- Result ---");
+        for (Subgraph s : result.getSubgraphs()) {
+            System.out.println(s + " internalWeight="
+                    + String.format("%.2f", s.getInternalWeight()));
+        }
+    }
+}
