@@ -57,6 +57,13 @@ public class TestRunner {
         }
 
         SubgraphPartitioner partitioner = new SubgraphPartitioner();
+        System.out.println("\n--- Edge check before partitioning ---");
+        for (Edge e : wc.getEdges()) {
+            System.out.println("  Edge: " + e.getSource().getId()
+                    + " -> " + e.getTarget().getId()
+                    + " Tr=" + e.getTupleTransmissionRate());
+        }
+        System.out.println("Total edge weight: " + wc.getTotalEdgeWeight());
         PartitionScheme scheme = partitioner.partition(wc, 2);
 
         // debug: confirm internal edges are found

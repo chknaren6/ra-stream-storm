@@ -65,7 +65,17 @@ public class ObjectiveFunction {
         double r      = computeCutRatio(scheme);
         double sigmaW = computeVariance(scheme);
 
-        // Equation 19
+        // Penalty: if ANY subgraph has zero internal weight,
+        // this partition is useless — heavily penalize it
+        for (Subgraph s : scheme.getSubgraphs()) {
+            if (s.getInternalWeight() == 0.0
+                    && s.getTaskCount() > 1) {
+                // Return a very high cost so this is never chosen
+                return 1000.0 + r + sigmaW;
+            }
+        }
+
+        // Equation 19: f(x) = epsilon * r + (1 - epsilon) * sigma_W
         return (epsilon * r) + ((1.0 - epsilon) * sigmaW);
     }
 

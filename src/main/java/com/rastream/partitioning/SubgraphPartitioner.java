@@ -1,5 +1,6 @@
 package com.rastream.partitioning;
 
+import com.rastream.dag.Edge;
 import com.rastream.dag.StreamApplication;
 import com.rastream.dag.Task;
 
@@ -21,13 +22,14 @@ public class SubgraphPartitioner {
 
     // Paper's parameter values from Table 4
     public SubgraphPartitioner() {
-        this.maxIter  = 100;
+        this.maxIter  = 200;
         this.T0       = 100.0;
         this.Tf       = 0.1;
         this.zeta     = 0.99;
-        this.epsilon  = 0.70;
+        this.epsilon  = 0.60;
         this.objectiveFunction = new ObjectiveFunction(epsilon);
         this.random   = new Random();
+
     }
 
     // Allow custom parameters for experimentation
@@ -45,29 +47,70 @@ public class SubgraphPartitioner {
 
     // Build starting partition: distribute tasks round-robin
     // across k subgraphs — this is x0 in Algorithm 1 line 2
+    // Build initial partition using topology-aware assignment
+// Tasks connected by edges start in the same subgraph
+// This gives simulated annealing a much better starting point
     private PartitionScheme buildInitialPartition(
             StreamApplication app, int k) {
 
-        PartitionScheme scheme =
-                new PartitionScheme(app.getEdges());
-
-        // Create k empty subgraphs
+        PartitionScheme scheme = new PartitionScheme(app.getEdges());
         for (int i = 0; i < k; i++) {
             scheme.addSubgraph(new Subgraph(i));
         }
 
-        // Assign tasks round-robin across subgraphs
-        List<Task> allTasks =
-                new ArrayList<>(app.getTasks().values());
-        for (int i = 0; i < allTasks.size(); i++) {
-            int subgraphIndex = i % k;
-            scheme.getSubgraphs()
-                    .get(subgraphIndex)
-                    .addTask(allTasks.get(i));
+        List<Task> allTasks = new ArrayList<>(app.getTasks().values());
+        List<Edge> allEdges = app.getEdges();
+
+        // Sort tasks so connected tasks get assigned together
+        // Strategy: assign task, then immediately assign its neighbors
+        java.util.Set<String> assigned = new java.util.HashSet<>();
+        int subgraphIndex = 0;
+        int tasksPerSubgraph = (int) Math.ceil(
+                (double) allTasks.size() / k);
+
+        for (Task seed : allTasks) {
+            if (assigned.contains(seed.getId())) continue;
+
+            // Assign seed task
+            Subgraph current = scheme.getSubgraphs().get(subgraphIndex);
+            current.addTask(seed);
+            assigned.add(seed.getId());
+
+            // Assign directly connected neighbors to same subgraph
+            for (Edge e : allEdges) {
+                if (current.getTaskCount() >= tasksPerSubgraph) break;
+
+                Task neighbor = null;
+                if (e.getSource().getId().equals(seed.getId())
+                        && !assigned.contains(e.getTarget().getId())) {
+                    neighbor = e.getTarget();
+                } else if (e.getTarget().getId().equals(seed.getId())
+                        && !assigned.contains(e.getSource().getId())) {
+                    neighbor = e.getSource();
+                }
+
+                if (neighbor != null) {
+                    current.addTask(neighbor);
+                    assigned.add(neighbor.getId());
+                }
+            }
+
+            // Move to next subgraph when current is full
+            if (current.getTaskCount() >= tasksPerSubgraph) {
+                subgraphIndex = Math.min(subgraphIndex + 1, k - 1);
+            }
         }
 
-        // Compute initial internal edges
         scheme.recomputeAllInternalEdges();
+
+        System.out.println("\n--- Initial partition ---");
+        for (Subgraph s : scheme.getSubgraphs()) {
+            System.out.println("  " + s + " internalWeight="
+                    + s.getInternalWeight());
+        }
+        System.out.println("  Initial f(x)="
+                + objectiveFunction.compute(scheme));
+
         return scheme;
     }
 
@@ -112,52 +155,61 @@ public class SubgraphPartitioner {
     public PartitionScheme partition(StreamApplication app, int k) {
 
         // Lines 1-4: initialize
-        PartitionScheme X  = buildInitialPartition(app, k);
-        double fX          = objectiveFunction.compute(X);
+        PartitionScheme current = buildInitialPartition(app, k);
+        double fCurrent = objectiveFunction.compute(current);
 
-        // Line 5: set initial temperature
-        double T           = T0;
+        // Track BEST solution separately — never lose it
+        PartitionScheme best = current.deepCopy();
+        double fBest = fCurrent;
+
+        double T = T0;
 
         System.out.println("Starting partitioning: k=" + k
                 + " tasks=" + app.getTaskCount()
-                + " initial f(x)=" + String.format("%.4f", fX));
+                + " initial f(x)=" + String.format("%.4f", fCurrent));
 
-        // Lines 7-20: outer cooling loop
         while (T > Tf) {
             int currentIter = 0;
 
-            // Lines 8-18: inner iteration loop
             while (currentIter < maxIter) {
 
-                // Line 9: generate neighbor solution
-                PartitionScheme xi = generateNeighbor(X);
-                double fXi = objectiveFunction.compute(xi);
+                // Generate neighbor
+                PartitionScheme neighbor = generateNeighbor(current);
+                double fNeighbor = objectiveFunction.compute(neighbor);
 
-                // Lines 11-16: accept or reject
-                if (fXi <= fX) {
-                    // Better solution — always accept (line 12)
-                    X  = xi;
-                    fX = fXi;
+                if (fNeighbor <= fCurrent) {
+                    // Better than current — always accept
+                    current  = neighbor;
+                    fCurrent = fNeighbor;
+
+                    // Also update best if this is the best ever seen
+                    if (fNeighbor < fBest) {
+                        best  = neighbor.deepCopy();
+                        fBest = fNeighbor;
+                    }
                 } else {
-                    // Worse solution — accept with probability p_i
-                    // Equation 20: p_i = exp((f(xi) - f(X)) / T)
-                    // Note: fXi > fX so exponent is positive/negative
-                    double pi = Math.exp((fX - fXi) / T);
+                    // Worse than current — accept with probability
+                    // Equation 20: pi = exp((fCurrent - fNeighbor) / T)
+                    double pi = Math.exp((fCurrent - fNeighbor) / T);
                     if (random.nextDouble() < pi) {
-                        X  = xi;
-                        fX = fXi;
+                        // Accept worse solution to escape local optimum
+                        // but DO NOT update best
+                        current  = neighbor;
+                        fCurrent = fNeighbor;
                     }
                 }
                 currentIter++;
             }
 
-            // Line 19: cool down — T = zeta * T
+            // Cool down
             T *= zeta;
         }
 
         System.out.println("Partitioning done: final f(x)="
-                + String.format("%.4f", fX));
-        return X;
+                + String.format("%.4f", fBest));
+
+        // Return BEST found, not current
+        return best;
     }
 
 }

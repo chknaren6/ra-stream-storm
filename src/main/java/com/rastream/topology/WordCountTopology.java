@@ -1,5 +1,7 @@
 package com.rastream.topology;
 
+import com.rastream.metrics.LatencyTracker;
+import com.rastream.metrics.ThroughputTracker;
 import org.apache.storm.spout.SpoutOutputCollector;
 import org.apache.storm.task.TopologyContext;
 import org.apache.storm.topology.OutputFieldsDeclarer;
@@ -11,6 +13,12 @@ import java.util.Map;
 import java.util.Random;
 
 public class WordCountTopology {
+    // Shared metric trackers — static so all bolts access same instance
+    // In a real cluster these would go through Storm's metrics API
+    public static final LatencyTracker LATENCY_TRACKER
+            = new com.rastream.metrics.LatencyTracker();
+    public static final ThroughputTracker THROUGHPUT_TRACKER
+            = new com.rastream.metrics.ThroughputTracker();
 
     // v1: reader — reads data tuples (Spout in Storm)
     // Parallelism = 2 tasks, matching paper Figure 2
@@ -38,20 +46,19 @@ public class WordCountTopology {
 
         @Override
         public void nextTuple() {
-            // Emit one sentence at a time as a tuple
-            String sentence = SENTENCES[
-                    random.nextInt(SENTENCES.length)];
-            collector.emit(new Values(sentence));
+            String sentence = SENTENCES[random.nextInt(SENTENCES.length)];
+            String tupleId  = java.util.UUID.randomUUID().toString();
 
-            // Small sleep to control emission rate
-            // In Phase 5 evaluation this is removed for max throughput
+            // Record emit time for latency tracking
+            WordCountTopology.LATENCY_TRACKER.recordEmit(tupleId);
+
+            collector.emit(new Values(sentence, tupleId));
             try { Thread.sleep(1); } catch (InterruptedException e) {}
         }
-
         @Override
-        public void declareOutputFields(
-                OutputFieldsDeclarer declarer) {
-            declarer.declare(new Fields("sentence"));
+        public void declareOutputFields(OutputFieldsDeclarer declarer) {
+            // Add tupleId field so it flows through the topology
+            declarer.declare(new Fields("sentence", "tupleId"));
         }
     }
     // v2: split — splits sentences into words
@@ -71,17 +78,16 @@ public class WordCountTopology {
         @Override
         public void execute(org.apache.storm.tuple.Tuple tuple) {
             String sentence = tuple.getStringByField("sentence");
-            // Split sentence into individual words
+            String tupleId  = tuple.getStringByField("tupleId");
             for (String word : sentence.split("\\s+")) {
-                collector.emit(new Values(word));
+                collector.emit(new Values(word, tupleId));
             }
             collector.ack(tuple);
         }
 
         @Override
-        public void declareOutputFields(
-                OutputFieldsDeclarer declarer) {
-            declarer.declare(new Fields("word"));
+        public void declareOutputFields(OutputFieldsDeclarer declarer) {
+            declarer.declare(new Fields("word", "tupleId"));
         }
     }
     // v3: count — counts word occurrences
@@ -104,16 +110,16 @@ public class WordCountTopology {
 
         @Override
         public void execute(org.apache.storm.tuple.Tuple tuple) {
-            String word = tuple.getStringByField("word");
+            String word    = tuple.getStringByField("word");
+            String tupleId = tuple.getStringByField("tupleId");
             counts.merge(word, 1, Integer::sum);
-            collector.emit(new Values(word, counts.get(word)));
+            collector.emit(new Values(word, counts.get(word), tupleId));
             collector.ack(tuple);
         }
 
         @Override
-        public void declareOutputFields(
-                OutputFieldsDeclarer declarer) {
-            declarer.declare(new Fields("word", "count"));
+        public void declareOutputFields(OutputFieldsDeclarer declarer) {
+            declarer.declare(new Fields("word", "count", "tupleId"));
         }
     }
 
@@ -134,13 +140,23 @@ public class WordCountTopology {
 
         @Override
         public void execute(org.apache.storm.tuple.Tuple tuple) {
+            String tupleId = tuple.getStringByField("tupleId");
+
+            // Record latency and throughput
+            WordCountTopology.LATENCY_TRACKER.recordReceive(tupleId);
+            WordCountTopology.THROUGHPUT_TRACKER.recordTuple();
+
             tupleCount++;
-            // Log every 1000 tuples to track throughput
             if (tupleCount % 1000 == 0) {
-                System.out.println("[Output] processed "
-                        + tupleCount + " tuples | "
-                        + tuple.getStringByField("word")
-                        + "=" + tuple.getIntegerByField("count"));
+                System.out.println("[Output] tuples=" + tupleCount
+                        + " | avg_latency="
+                        + String.format("%.2f",
+                        WordCountTopology.LATENCY_TRACKER
+                                .getAverageLatencyMs()) + "ms"
+                        + " | throughput="
+                        + String.format("%.0f",
+                        WordCountTopology.THROUGHPUT_TRACKER
+                                .getThroughput()) + " t/s");
             }
             collector.ack(tuple);
         }

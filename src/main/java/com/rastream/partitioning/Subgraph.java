@@ -40,9 +40,17 @@ public class Subgraph {
     // An edge is internal if BOTH source and target are in this subgraph
     public void recomputeInternalEdges(List<Edge> allEdges) {
         internalEdges.clear();
+        // Build a set of IDs in this subgraph for fast lookup
+        java.util.Set<String> taskIds = new java.util.HashSet<>();
+        for (Task t : tasks) {
+            taskIds.add(t.getId());
+        }
+        // Edge is internal only if BOTH endpoints are in this subgraph
         for (Edge e : allEdges) {
-            boolean sourceHere = containsTask(e.getSource());
-            boolean targetHere = containsTask(e.getTarget());
+            boolean sourceHere = taskIds.contains(
+                    e.getSource().getId());
+            boolean targetHere = taskIds.contains(
+                    e.getTarget().getId());
             if (sourceHere && targetHere) {
                 internalEdges.add(e);
             }
