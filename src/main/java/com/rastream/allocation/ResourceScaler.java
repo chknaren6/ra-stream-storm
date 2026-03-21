@@ -1,6 +1,7 @@
-package com.rastream.model;
+package com.rastream.allocation;
 
 import com.rastream.dag.Task;
+import com.rastream.model.ResourceModel;
 import com.rastream.partitioning.PartitionScheme;
 import com.rastream.partitioning.Subgraph;
 

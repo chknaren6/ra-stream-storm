@@ -41,6 +41,13 @@ public class StreamApplication {
     }
 
     // Convenience method - create and add an edge in one call
+    public Edge connect(Task source, Task target, double rate) {
+        Edge edge = new Edge(source, target);
+        edge.setTupleTransmissionRate(rate);
+        addEdge(edge);
+        return edge;
+    }
+
     public Edge connect(Task source, Task target){
         Edge edge = new Edge(source,target);
         addEdge(edge);
