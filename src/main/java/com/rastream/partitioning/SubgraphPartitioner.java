@@ -103,13 +103,11 @@ public class SubgraphPartitioner {
 
         scheme.recomputeAllInternalEdges();
 
-        System.out.println("\n--- Initial partition ---");
         for (Subgraph s : scheme.getSubgraphs()) {
             System.out.println("  " + s + " internalWeight="
                     + s.getInternalWeight());
         }
-        System.out.println("  Initial f(x)="
-                + objectiveFunction.compute(scheme));
+
 
         return scheme;
     }

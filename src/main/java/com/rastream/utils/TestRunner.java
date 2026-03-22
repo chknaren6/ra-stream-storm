@@ -50,14 +50,9 @@ public class TestRunner {
         wc.connect(v2t1, v3t1, 80.0);
         wc.connect(v2t2, v3t2, 90.0);
 
-        // debug: confirm edges have non-zero rates
-        System.out.println("\n--- Debug: edges ---");
-        for (Edge e : wc.getEdges()) {
-            System.out.println("  " + e);
-        }
+
 
         SubgraphPartitioner partitioner = new SubgraphPartitioner();
-        System.out.println("\n--- Edge check before partitioning ---");
         for (Edge e : wc.getEdges()) {
             System.out.println("  Edge: " + e.getSource().getId()
                     + " -> " + e.getTarget().getId()
@@ -66,8 +61,6 @@ public class TestRunner {
         System.out.println("Total edge weight: " + wc.getTotalEdgeWeight());
         PartitionScheme scheme = partitioner.partition(wc, 2);
 
-        // debug: confirm internal edges are found
-        System.out.println("\n--- Debug: subgraphs after partitioning ---");
         for (Subgraph s : scheme.getSubgraphs()) {
             System.out.println("  " + s);
             System.out.println("  internal edges: "
