@@ -1,0 +1,31 @@
+# Maven
+target/
+*.class
+
+# Data files — never commit these, too large
+data/
+*.csv
+*.parquet
+*.zip
+*.gz
+*.bz2
+*.xml.bz2
+
+# Metrics output — generated at runtime
+metrics/
+
+# IDE
+.idea/
+*.iml
+.vscode/
+
+# Logs
+*.log
+logs/
+
+# Docker volumes
+docker/volumes/
+
+# OS
+.DS_Store
+Thumbs.db
