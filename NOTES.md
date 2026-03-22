@@ -80,20 +80,40 @@ Zone 265: avgFare=82.73, trips=12 → flagged by AnomalyBolt
 Zone 93:  avgFare=70.00, trips=16 → borderline
 
 ### Next Steps
-1. Docker setup: 1 nimbus + 5 supervisors (scale to 14 later)
-2. Run same topology on Docker → compare throughput and latency
-3. Run EvenScheduler on same Docker → compare with RaStream
-4. Record all results in metrics/local/taxi/metrics.csv
 5. Scale to 14 Docker containers → approach paper's setup
 6. Connect 15 real machines → reproduce paper results exactly
 
-## Docker Setup (PENDING)
-- Target: 1 nimbus + 14 supervisors
-- RAM per supervisor: 2GB (matches paper's cluster spec)
-- Total Docker RAM: ~30GB (fits in 64GB machine)
-- Expected throughput: 5,000-15,000 t/s
-- Expected latency: 5-15ms (real network between containers)
 
+## Docker Mode Results (5 supervisors, 1-5 workers)
+Date: 2026-03-22
+
+### Topology Configuration
+- Same as local but deployed across Docker containers
+- 5 supervisors × 2GB RAM each
+- Worker heap: 1536MB
+- Spout mode: streaming CSV (not in-memory — OOM with 512MB)
+
+### Results
+| Config      | Throughput | Latency | Notes                    |
+|-------------|------------|---------|--------------------------|
+| 1 worker    | 1,845 t/s  | 0.42ms  | Single JVM, accurate     |
+| 5 workers   | ~619 t/s   | 0.00ms  | Cross-JVM tracker broken |
+
+### Issues Found
+1. Static LatencyTracker breaks across workers — needs Storm metrics API
+2. In-memory spout OOMs at 512MB heap, switched to streaming mode
+3. 5-worker throughput LOWER than 1-worker due to Netty overhead in Docker
+   (all on same physical machine — no real network benefit)
+
+### Key Insight
+With all containers on same machine, more workers = more Netty serialization
+overhead without any network parallelism benefit. Real benefit shows on
+14 separate physical machines where each worker has dedicated CPU + RAM.
+
+### Next Steps
+1. Fix distributed metrics using Storm's IMetricsConsumer
+2. Scale to 14 supervisors on same machine
+3. Deploy on 15 real machines for paper-accurate results
 ## Real Cluster Setup (PENDING)
 - 15 machines, each 2GB RAM worker
 - Matches paper Section 6.1 exactly
