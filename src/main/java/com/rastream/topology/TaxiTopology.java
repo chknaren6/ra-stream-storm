@@ -27,6 +27,15 @@ public class TaxiTopology {
     public static final ThroughputTracker THROUGHPUT_TRACKER
             = new ThroughputTracker();
 
+    private static final boolean IN_MEMORY_MODE =
+            System.getenv("IN_MEMORY_MODE") != null
+                    && System.getenv("IN_MEMORY_MODE").equals("true");
+
+    private static org.apache.commons.csv.CSVParser parser;
+    private static java.util.Iterator<org.apache.commons.csv.CSVRecord> iterator;
+    private List<String[]> rows;
+    private int currentIndex = 0;
+
     // Target emit rate — change this to control load
     // Start at 3000, increase to find your system's limit
     public static volatile int TARGET_RATE_TPS = 3000;
@@ -40,61 +49,104 @@ public class TaxiTopology {
         private List<String[]> rows;
         private int currentIndex = 0;
 
+
+
         private static final String CSV_PATH =
-                System.getProperty("user.home") + "/ra-stream-data/nyc-taxi/combined.csv";
+                System.getenv("CSV_PATH") != null
+                        ? System.getenv("CSV_PATH")
+                        : System.getProperty("user.home")
+                        + "/ra-stream-data/nyc-taxi/combined.csv";
 
         @Override
         public void open(Map<String, Object> conf,
                          TopologyContext context,
                          SpoutOutputCollector collector) {
             this.collector = collector;
-            this.rows = new java.util.ArrayList<>();
 
-            System.out.println("TaxiSpout: loading CSV into memory...");
-            try (java.io.BufferedReader br =
-                         new java.io.BufferedReader(
-                                 new java.io.FileReader(CSV_PATH))) {
-                String header = br.readLine(); // skip header
-                String line;
-                while ((line = br.readLine()) != null) {
-                    rows.add(line.split(",", -1));
+            if (IN_MEMORY_MODE) {
+                // Load all rows into memory (for local mode)
+                this.rows = new java.util.ArrayList<>();
+                System.out.println("TaxiSpout: loading CSV into memory...");
+                try (java.io.BufferedReader br =
+                             new java.io.BufferedReader(
+                                     new java.io.FileReader(CSV_PATH))) {
+                    br.readLine(); // skip header
+                    String line;
+                    while ((line = br.readLine()) != null) {
+                        rows.add(line.split(",", -1));
+                    }
+                } catch (Exception e) {
+                    throw new RuntimeException("Cannot load CSV", e);
                 }
-            } catch (Exception e) {
-                throw new RuntimeException("Cannot load CSV", e);
+                System.out.println("TaxiSpout: loaded "
+                        + rows.size() + " rows into memory");
+            } else {
+                // Stream mode — read row by row (for Docker/cluster)
+                System.out.println("TaxiSpout: streaming CSV from disk");
+                try {
+                    openCsvParser();
+                } catch (Exception e) {
+                    throw new RuntimeException("Cannot open CSV: "
+                            + CSV_PATH, e);
+                }
             }
-            System.out.println("TaxiSpout: loaded "
-                    + rows.size() + " rows into memory");
+        }
+
+        private void openCsvParser() throws Exception {
+            java.io.Reader reader = new java.io.FileReader(CSV_PATH);
+            parser = org.apache.commons.csv.CSVFormat.DEFAULT
+                    .withFirstRecordAsHeader()
+                    .withIgnoreHeaderCase()
+                    .withTrim()
+                    .parse(reader);
+            iterator = parser.iterator();
         }
 
         @Override
         public void nextTuple() {
             long nowNs = System.nanoTime();
             long intervalNs = 1_000_000_000L / TARGET_RATE_TPS;
-
             if (nowNs - lastEmitNs < intervalNs) return;
             lastEmitNs = nowNs;
 
-            // Loop back if exhausted
-            if (currentIndex >= rows.size()) {
-                currentIndex = 0;
-            }
-
-            String[] r = rows.get(currentIndex++);
-            if (r.length < 8) return;
-
-            String tupleId = UUID.randomUUID().toString();
-            LATENCY_TRACKER.recordEmit(tupleId);
-
             try {
+                String[] r;
+
+                if (IN_MEMORY_MODE) {
+                    if (currentIndex >= rows.size()) currentIndex = 0;
+                    r = rows.get(currentIndex++);
+                    if (r.length < 8) return;
+                } else {
+                    if (!iterator.hasNext()) {
+                        parser.close();
+                        openCsvParser();
+                    }
+                    org.apache.commons.csv.CSVRecord record =
+                            iterator.next();
+                    r = new String[]{
+                            record.get("VendorID"),
+                            record.get("tpep_pickup_datetime"),
+                            record.get("PULocationID"),
+                            record.get("DOLocationID"),
+                            record.get("fare_amount"),
+                            record.get("total_amount"),
+                            record.get("trip_distance"),
+                            record.get("passenger_count")
+                    };
+                }
+
+                String tupleId = java.util.UUID.randomUUID().toString();
+                LATENCY_TRACKER.recordEmit(tupleId);
+
                 collector.emit(new Values(
-                        safeInt(r, 0),    // VendorID
-                        r[2].trim(),      // PULocationID
-                        r[3].trim(),      // DOLocationID
-                        safeDouble(r, 4), // fare_amount
-                        safeDouble(r, 5), // total_amount
-                        safeDouble(r, 6), // trip_distance
-                        safeDouble(r, 7), // passenger_count
-                        r[1].trim(),      // tpep_pickup_datetime
+                        safeInt(r, 0),
+                        r[2].trim(),
+                        r[3].trim(),
+                        safeDouble(r, 4),
+                        safeDouble(r, 5),
+                        safeDouble(r, 6),
+                        safeDouble(r, 7),
+                        r[1].trim(),
                         tupleId
                 ));
             } catch (Exception e) {

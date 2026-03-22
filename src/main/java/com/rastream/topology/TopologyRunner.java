@@ -17,12 +17,13 @@ public class TopologyRunner {
         System.out.println("Starting rate: "
                 + TaxiTopology.TARGET_RATE_TPS + " t/s");
 
-        // Create metrics directory if not exists
-        new java.io.File(System.getProperty("user.home")
-                + "/ra-stream-metrics/local/taxi").mkdirs();
+        String metricsBase = System.getenv("METRICS_PATH") != null
+                ? System.getenv("METRICS_PATH")
+                : System.getProperty("user.home") + "/ra-stream-metrics/local/taxi";
 
-        MetricsCSVWriter csv = new MetricsCSVWriter(
-                System.getProperty("user.home") + "/ra-stream-metrics/local/taxi/metrics.csv");
+        new java.io.File(metricsBase).mkdirs();
+        MetricsCSVWriter csv = new MetricsCSVWriter(metricsBase + "/metrics.csv");
+
         csv.open();
 
         TopologyBuilder builder = TaxiTopology.buildTopology();

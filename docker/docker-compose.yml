@@ -1,0 +1,157 @@
+version: '3.8'
+
+networks:
+  ra-stream-net:
+    driver: bridge
+
+services:
+
+  zookeeper:
+    image: zookeeper:3.9.1
+    container_name: zookeeper
+    hostname: zookeeper
+    networks:
+      - ra-stream-net
+    ports:
+      - "2181:2181"
+    environment:
+      ZOO_MY_ID: 1
+    mem_limit: 512m
+    restart: unless-stopped
+
+  nimbus:
+    image: storm:2.6.0
+    container_name: nimbus
+    hostname: nimbus
+    networks:
+      - ra-stream-net
+    ports:
+      - "6627:6627"
+      - "8080:8080"
+    depends_on:
+      - zookeeper
+    command: >
+      bash -c "mkdir -p /logs /storm/data &&
+               storm nimbus"
+    volumes:
+      - ./storm.yaml:/conf/storm.yaml
+    mem_limit: 1g
+    restart: unless-stopped
+
+  storm-ui:
+    image: storm:2.6.0
+    container_name: storm-ui
+    hostname: storm-ui
+    networks:
+      - ra-stream-net
+    ports:
+      - "8081:8080"
+    depends_on:
+      - nimbus
+    command: >
+      bash -c "mkdir -p /logs /storm/data &&
+               storm ui"
+    volumes:
+      - ./storm.yaml:/conf/storm.yaml
+    mem_limit: 512m
+    restart: unless-stopped
+
+  supervisor1:
+    image: storm:2.6.0
+    container_name: supervisor1
+    hostname: supervisor1
+    networks:
+      - ra-stream-net
+    depends_on:
+      - nimbus
+    environment:
+      - CSV_PATH=/home/karthik_hadoop/ra-stream-data/nyc-taxi/combined.csv
+      - METRICS_PATH=/home/karthik_hadoop/ra-stream-metrics/local/taxi
+    command: >
+      bash -c "mkdir -p /logs /storm/data &&
+               storm supervisor"
+    volumes:
+      - ./storm.yaml:/conf/storm.yaml
+      - /home/karthik_hadoop/ra-stream-data:/home/karthik_hadoop/ra-stream-data:ro
+    mem_limit: 3g
+    restart: unless-stopped
+
+  supervisor2:
+    image: storm:2.6.0
+    container_name: supervisor2
+    hostname: supervisor2
+    networks:
+      - ra-stream-net
+    depends_on:
+      - nimbus
+    environment:
+      - CSV_PATH=/home/karthik_hadoop/ra-stream-data/nyc-taxi/combined.csv
+      - METRICS_PATH=/home/karthik_hadoop/ra-stream-metrics/local/taxi
+    command: >
+      bash -c "mkdir -p /logs /storm/data &&
+               storm supervisor"
+    volumes:
+      - ./storm.yaml:/conf/storm.yaml
+      - /home/karthik_hadoop/ra-stream-data:/home/karthik_hadoop/ra-stream-data:ro
+    mem_limit: 3g
+    restart: unless-stopped
+
+  supervisor3:
+    image: storm:2.6.0
+    container_name: supervisor3
+    hostname: supervisor3
+    networks:
+      - ra-stream-net
+    depends_on:
+      - nimbus
+    environment:
+      - CSV_PATH=/home/karthik_hadoop/ra-stream-data/nyc-taxi/combined.csv
+      - METRICS_PATH=/home/karthik_hadoop/ra-stream-metrics/local/taxi
+    command: >
+      bash -c "mkdir -p /logs /storm/data &&
+               storm supervisor"
+    volumes:
+      - ./storm.yaml:/conf/storm.yaml
+      - /home/karthik_hadoop/ra-stream-data:/home/karthik_hadoop/ra-stream-data:ro
+    mem_limit: 3g
+    restart: unless-stopped
+
+  supervisor4:
+    image: storm:2.6.0
+    container_name: supervisor4
+    hostname: supervisor4
+    networks:
+      - ra-stream-net
+    depends_on:
+      - nimbus
+    environment:
+      - CSV_PATH=/home/karthik_hadoop/ra-stream-data/nyc-taxi/combined.csv
+      - METRICS_PATH=/home/karthik_hadoop/ra-stream-metrics/local/taxi
+    command: >
+      bash -c "mkdir -p /logs /storm/data &&
+               storm supervisor"
+    volumes:
+      - ./storm.yaml:/conf/storm.yaml
+      - /home/karthik_hadoop/ra-stream-data:/home/karthik_hadoop/ra-stream-data:ro
+    mem_limit: 3g
+    restart: unless-stopped
+
+  supervisor5:
+    image: storm:2.6.0
+    container_name: supervisor5
+    hostname: supervisor5
+    networks:
+      - ra-stream-net
+    depends_on:
+      - nimbus
+    environment:
+      - CSV_PATH=/home/karthik_hadoop/ra-stream-data/nyc-taxi/combined.csv
+      - METRICS_PATH=/home/karthik_hadoop/ra-stream-metrics/local/taxi
+    command: >
+      bash -c "mkdir -p /logs /storm/data &&
+               storm supervisor"
+    volumes:
+      - ./storm.yaml:/conf/storm.yaml
+      - /home/karthik_hadoop/ra-stream-data:/home/karthik_hadoop/ra-stream-data:ro
+    mem_limit: 3g
+    restart: unless-stopped
