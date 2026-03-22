@@ -22,7 +22,7 @@ public class TopologyRunner {
                 + "/ra-stream-metrics/local/taxi").mkdirs();
 
         MetricsCSVWriter csv = new MetricsCSVWriter(
-                System.getProperty("user.home") + "/ra-stream-storm/metrics/local/taxi/metrics.csv");
+                System.getProperty("user.home") + "/ra-stream-metrics/local/taxi/metrics.csv");
         csv.open();
 
         TopologyBuilder builder = TaxiTopology.buildTopology();

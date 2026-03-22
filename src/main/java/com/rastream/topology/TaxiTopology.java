@@ -41,7 +41,7 @@ public class TaxiTopology {
         private int currentIndex = 0;
 
         private static final String CSV_PATH =
-                System.getProperty("user.home") + "/ra-stream-storm/data/nyc-taxi/combined.csv";
+                System.getProperty("user.home") + "/ra-stream-data/nyc-taxi/combined.csv";
 
         @Override
         public void open(Map<String, Object> conf,
