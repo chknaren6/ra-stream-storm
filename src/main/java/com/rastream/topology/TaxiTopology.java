@@ -36,6 +36,7 @@ public class TaxiTopology {
     private List<String[]> rows;
     private int currentIndex = 0;
 
+    public static final String[] COMPONENT_NAMES = {"taxi-reader", "taxi-validator", "taxi-aggregator", "taxi-anomaly", "taxi-output"};
     // Target emit rate — change this to control load
     // Start at 3000, increase to find your system's limit
     public static volatile int TARGET_RATE_TPS = 3000;

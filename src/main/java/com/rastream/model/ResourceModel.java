@@ -49,6 +49,9 @@ public class ResourceModel {
     public void recordTupleCount(Task task, long count) {
         tupleCountMap.put(task.getId(), count);
     }
+    public double getNodeTotalUtilization() {
+        return (alpha * nodeCpuUtilization) + (beta * nodeMemUtilization) + ((1 - alpha - beta) * nodeIoUtilization);
+    }
 
     // Get total tuples processed by ALL tasks on this node
     public long getTotalTupleCount() {

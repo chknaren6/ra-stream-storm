@@ -18,7 +18,11 @@ public class ClusterTopologyRunner {
 
         // Number of worker JVMs across the cluster
         // 5 supervisors × 4 slots = 20 slots available
-        conf.setNumWorkers(5);        // Worker memory
+        conf.setNumWorkers(5);
+        // Worker memory
+        conf.registerMetricsConsumer(com.rastream.monitor.DataMonitor.class, 1);
+        //conf.registerMetricsConsumer(
+        //        com.rastream.metrics.StormMetricsConsumer.class, 1);
         conf.put(Config.WORKER_HEAP_MEMORY_MB, 1536);
         // Tell Storm where nimbus is
         conf.put(Config.NIMBUS_SEEDS,
