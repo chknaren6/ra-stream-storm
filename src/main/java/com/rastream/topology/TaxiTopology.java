@@ -1,10 +1,13 @@
 package com.rastream.topology;
 
+import com.rastream.dag.Edge;
+import com.rastream.dag.StreamApplication;
+import com.rastream.dag.Task;
 import com.rastream.metrics.LatencyTracker;
 import com.rastream.metrics.ThroughputTracker;
-import org.apache.commons.csv.CSVFormat;
-import org.apache.commons.csv.CSVParser;
-import org.apache.commons.csv.CSVRecord;
+import com.rastream.model.CommunicationModel;
+import com.rastream.model.ResourceModel;
+import com.rastream.monitor.DataMonitor;
 import org.apache.storm.spout.SpoutOutputCollector;
 import org.apache.storm.task.TopologyContext;
 import org.apache.storm.topology.OutputFieldsDeclarer;
@@ -12,12 +15,9 @@ import org.apache.storm.topology.TopologyBuilder;
 import org.apache.storm.topology.base.BaseRichSpout;
 import org.apache.storm.tuple.Fields;
 import org.apache.storm.tuple.Values;
-import java.io.FileReader;
-import java.io.Reader;
-import java.util.Iterator;
+
 import java.util.List;
 import java.util.Map;
-import java.util.UUID;
 
 public class TaxiTopology {
 
@@ -31,26 +31,27 @@ public class TaxiTopology {
             System.getenv("IN_MEMORY_MODE") != null
                     && System.getenv("IN_MEMORY_MODE").equals("true");
 
+    // Static CSV parser state for streaming mode
     private static org.apache.commons.csv.CSVParser parser;
     private static java.util.Iterator<org.apache.commons.csv.CSVRecord> iterator;
-    private List<String[]> rows;
-    private int currentIndex = 0;
 
-    public static final String[] COMPONENT_NAMES = {"taxi-reader", "taxi-validator", "taxi-aggregator", "taxi-anomaly", "taxi-output"};
+    public static final String[] COMPONENT_NAMES = {
+            "taxi-reader", "taxi-validator", "taxi-aggregator",
+            "taxi-anomaly", "taxi-output"
+    };
+
     // Target emit rate — change this to control load
-    // Start at 3000, increase to find your system's limit
     public static volatile int TARGET_RATE_TPS = 3000;
 
+    // -----------------------------------------------------------------------
+    // Spout
+    // -----------------------------------------------------------------------
     public static class TaxiSpout extends BaseRichSpout {
 
         private SpoutOutputCollector collector;
         private long lastEmitNs = 0;
-
-        // Pre-loaded in memory — eliminates I/O bottleneck
         private List<String[]> rows;
         private int currentIndex = 0;
-
-
 
         private static final String CSV_PATH =
                 System.getenv("CSV_PATH") != null
@@ -65,7 +66,6 @@ public class TaxiTopology {
             this.collector = collector;
 
             if (IN_MEMORY_MODE) {
-                // Load all rows into memory (for local mode)
                 this.rows = new java.util.ArrayList<>();
                 System.out.println("TaxiSpout: loading CSV into memory...");
                 try (java.io.BufferedReader br =
@@ -82,13 +82,11 @@ public class TaxiTopology {
                 System.out.println("TaxiSpout: loaded "
                         + rows.size() + " rows into memory");
             } else {
-                // Stream mode — read row by row (for Docker/cluster)
                 System.out.println("TaxiSpout: streaming CSV from disk");
                 try {
                     openCsvParser();
                 } catch (Exception e) {
-                    throw new RuntimeException("Cannot open CSV: "
-                            + CSV_PATH, e);
+                    throw new RuntimeException("Cannot open CSV: " + CSV_PATH, e);
                 }
             }
         }
@@ -122,8 +120,7 @@ public class TaxiTopology {
                         parser.close();
                         openCsvParser();
                     }
-                    org.apache.commons.csv.CSVRecord record =
-                            iterator.next();
+                    org.apache.commons.csv.CSVRecord record = iterator.next();
                     r = new String[]{
                             record.get("VendorID"),
                             record.get("tpep_pickup_datetime"),
@@ -140,14 +137,14 @@ public class TaxiTopology {
                 LATENCY_TRACKER.recordEmit(tupleId);
 
                 collector.emit(new Values(
-                        safeInt(r, 0),
-                        r[2].trim(),
-                        r[3].trim(),
-                        safeDouble(r, 4),
-                        safeDouble(r, 5),
-                        safeDouble(r, 6),
-                        safeDouble(r, 7),
-                        r[1].trim(),
+                        safeInt(r, 0),    // vendorId
+                        r[2].trim(),      // pickupZone
+                        r[3].trim(),      // dropoffZone
+                        safeDouble(r, 4), // fareAmount
+                        safeDouble(r, 5), // totalAmount
+                        safeDouble(r, 6), // tripDistance
+                        safeDouble(r, 7), // passengerCount
+                        r[1].trim(),      // pickupTime
                         tupleId
                 ));
             } catch (Exception e) {
@@ -166,17 +163,18 @@ public class TaxiTopology {
         }
 
         @Override
-        public void declareOutputFields(
-                OutputFieldsDeclarer d) {
+        public void declareOutputFields(OutputFieldsDeclarer d) {
             d.declare(new Fields(
                     "vendorId", "pickupZone", "dropoffZone",
                     "fareAmount", "totalAmount", "tripDistance",
                     "passengerCount", "pickupTime", "tupleId"));
         }
     }
+
+    // -----------------------------------------------------------------------
     // ValidatorBolt — HIGH Tr with TaxiSpout
-    // Ra-Stream places these TWO in same process
-    // This is where fine-grained scheduling saves the most
+    // Ra-Stream places these TWO in same process (fine-grained scheduling)
+    // -----------------------------------------------------------------------
     public static class ValidatorBolt
             extends org.apache.storm.topology.base.BaseRichBolt {
 
@@ -197,11 +195,9 @@ public class TaxiTopology {
             double distance = t.getDoubleByField("tripDistance");
             String zone     = t.getStringByField("pickupZone");
 
-            // Drop invalid rows
-            // These are the 71K null rows from our analysis
             boolean valid = fare > 0
-                    && fare < 500          // no crazy fares
-                    && distance >= 0       // no negative distance
+                    && fare < 500
+                    && distance >= 0
                     && zone != null
                     && !zone.isEmpty();
 
@@ -212,7 +208,6 @@ public class TaxiTopology {
             }
 
             passed++;
-            // Pass all fields through plus validation flag
             collector.emit(new Values(
                     t.getStringByField("pickupZone"),
                     t.getStringByField("dropoffZone"),
@@ -228,8 +223,7 @@ public class TaxiTopology {
         }
 
         @Override
-        public void declareOutputFields(
-                OutputFieldsDeclarer d) {
+        public void declareOutputFields(OutputFieldsDeclarer d) {
             d.declare(new Fields(
                     "pickupZone", "dropoffZone",
                     "fareAmount", "totalAmount",
@@ -237,21 +231,17 @@ public class TaxiTopology {
                     "pickupTime", "tupleId"));
         }
     }
-    // AggregateBolt — groups trips by pickup zone
-    // Uses fieldsGrouping so same zone always hits same task
-    // This is critical for correct aggregation
+
+    // -----------------------------------------------------------------------
+    // AggregateBolt — groups trips by pickup zone (10-second tumbling window)
+    // -----------------------------------------------------------------------
     public static class AggregateBolt
             extends org.apache.storm.topology.base.BaseRichBolt {
 
         private org.apache.storm.task.OutputCollector collector;
-
-        // In-memory aggregation per zone
-        private final Map<String, double[]> zoneStats
-                = new java.util.HashMap<>();
-        // double[] = [tripCount, totalFare, totalDistance]
-
+        private final Map<String, double[]> zoneStats = new java.util.HashMap<>();
         private long windowStart = System.currentTimeMillis();
-        private static final long WINDOW_MS = 10_000; // 10 second window
+        private static final long WINDOW_MS = 10_000;
 
         @Override
         public void prepare(Map<String, Object> conf,
@@ -262,32 +252,28 @@ public class TaxiTopology {
 
         @Override
         public void execute(org.apache.storm.tuple.Tuple t) {
-            String zone  = t.getStringByField("pickupZone");
-            double fare  = t.getDoubleByField("fareAmount");
-            double dist  = t.getDoubleByField("tripDistance");
+            String zone = t.getStringByField("pickupZone");
+            double fare = t.getDoubleByField("fareAmount");
+            double dist = t.getDoubleByField("tripDistance");
 
-            // Accumulate stats for this zone
-            zoneStats.computeIfAbsent(zone,
-                    k -> new double[]{0, 0, 0});
+            zoneStats.computeIfAbsent(zone, k -> new double[]{0, 0, 0});
             double[] stats = zoneStats.get(zone);
-            stats[0]++;         // trip count
-            stats[1] += fare;   // total fare
-            stats[2] += dist;   // total distance
+            stats[0]++;
+            stats[1] += fare;
+            stats[2] += dist;
 
-            // Emit window summary every 10 seconds
             long now = System.currentTimeMillis();
             if (now - windowStart >= WINDOW_MS) {
-                for (Map.Entry<String, double[]> e
-                        : zoneStats.entrySet()) {
+                for (Map.Entry<String, double[]> e : zoneStats.entrySet()) {
                     double[] s = e.getValue();
-                    double avgFare = s[0] > 0 ? s[1]/s[0] : 0;
-                    double avgDist = s[0] > 0 ? s[2]/s[0] : 0;
+                    double avgFare = s[0] > 0 ? s[1] / s[0] : 0;
+                    double avgDist = s[0] > 0 ? s[2] / s[0] : 0;
                     collector.emit(new Values(
-                            e.getKey(),     // zone
-                            (long) s[0],    // trip count
-                            s[1],           // total fare
-                            avgFare,        // avg fare
-                            avgDist,        // avg distance
+                            e.getKey(),
+                            (long) s[0],
+                            s[1],
+                            avgFare,
+                            avgDist,
                             t.getStringByField("tupleId")
                     ));
                 }
@@ -298,16 +284,16 @@ public class TaxiTopology {
         }
 
         @Override
-        public void declareOutputFields(
-                OutputFieldsDeclarer d) {
+        public void declareOutputFields(OutputFieldsDeclarer d) {
             d.declare(new Fields(
                     "zone", "tripCount", "totalFare",
                     "avgFare", "avgDistance", "tupleId"));
         }
     }
-    // AnomalyBolt — detects suspicious trips
-    // LOW Tr — only fires on anomalies (rare)
-    // Inter-process is acceptable here
+
+    // -----------------------------------------------------------------------
+    // AnomalyBolt — LOW Tr, fires only on suspicious trips
+    // -----------------------------------------------------------------------
     public static class AnomalyBolt
             extends org.apache.storm.topology.base.BaseRichBolt {
 
@@ -327,9 +313,6 @@ public class TaxiTopology {
             double avgDist = t.getDoubleByField("avgDistance");
             long   trips   = t.getLongByField("tripCount");
 
-            // Flag anomalies:
-            // High fare + short distance = suspicious
-            // Very high trip count = possible data issue
             boolean anomaly =
                     (avgFare > 80 && avgDist < 1.0)
                             || (trips > 10000)
@@ -348,15 +331,16 @@ public class TaxiTopology {
         }
 
         @Override
-        public void declareOutputFields(
-                OutputFieldsDeclarer d) {
+        public void declareOutputFields(OutputFieldsDeclarer d) {
             d.declare(new Fields(
                     "zone", "tripCount", "avgFare",
                     "avgDistance", "alertId", "tupleId"));
         }
     }
 
-    // OutputBolt — measures latency and throughput
+    // -----------------------------------------------------------------------
+    // OutputBolt — measures end-to-end latency and throughput
+    // -----------------------------------------------------------------------
     public static class OutputBolt
             extends org.apache.storm.topology.base.BaseRichBolt {
 
@@ -373,16 +357,13 @@ public class TaxiTopology {
         @Override
         public void execute(org.apache.storm.tuple.Tuple t) {
             tupleCount++;
-
-            // Record latency — tupleId flows from spout through aggregator
             String tupleId = t.getStringByField("tupleId");
             LATENCY_TRACKER.recordReceive(tupleId);
 
             if (tupleCount % 100 == 0) {
                 System.out.printf(
-                        "[Taxi Output] windows=%d zone=%s " +
-                                "trips=%d avgFare=%.2f " +
-                                "| raw_throughput=%.0f t/s latency=%.2fms%n",
+                        "[Taxi Output] windows=%d zone=%s trips=%d avgFare=%.2f"
+                                + " | throughput=%.0f t/s latency=%.2fms%n",
                         tupleCount,
                         t.getStringByField("zone"),
                         t.getLongByField("tripCount"),
@@ -394,47 +375,110 @@ public class TaxiTopology {
         }
 
         @Override
-        public void declareOutputFields(
-                OutputFieldsDeclarer d) {
-            d.declare(new Fields());
+        public void declareOutputFields(OutputFieldsDeclarer d) {
+            d.declare(new Fields()); // terminal bolt
         }
     }
-    // Build topology — parallelism matches paper Figure 2 style
-    // Spout(2) → Validator(3) → Aggregator(3) → Anomaly(2) → Output(2)
+
+    // -----------------------------------------------------------------------
+    // buildTopology() — Taxi-only, DataMonitor wired to the Taxi DAG
     //
-    // Fine-grained scheduling will pair:
-    //   Spout task 1 + Validator task 1 → same process (HIGH Tr)
-    //   Spout task 2 + Validator task 2 → same process (HIGH Tr)
-    //   Aggregator + Anomaly → inter-process OK (LOW Tr)
+    // Topology shape (matches paper Figure 8 style):
+    //   TaxiSpout(2) → ValidatorBolt(3) → AggregateBolt(3)
+    //                                           ├→ AnomalyBolt(2)
+    //                                           └→ OutputBolt(2)
+    //
+    // Fine-grained co-location intent:
+    //   TaxiSpout task k + ValidatorBolt task k → same process (HIGH Tr)
+    //   AggregateBolt → AnomalyBolt / OutputBolt → inter-process OK (LOW Tr)
+    // -----------------------------------------------------------------------
     public static TopologyBuilder buildTopology() {
+
+        // --- Build the Taxi DAG for DataMonitor ---
+        // Vertex IDs match COMPONENT_NAMES order:
+        //   v1 = taxi-reader, v2 = taxi-validator, v3 = taxi-aggregator,
+        //   v4 = taxi-anomaly, v5 = taxi-output
+        StreamApplication taxiApp = new StreamApplication("TaxiNYC-DAG");
+
+        // Tasks per vertex (parallelism hints match Storm config below)
+        Task reader1 = new Task(1, 0, "taxi-reader");
+        Task reader2 = new Task(1, 1, "taxi-reader");
+
+        Task validator1 = new Task(2, 0, "taxi-validator");
+        Task validator2 = new Task(2, 1, "taxi-validator");
+        Task validator3 = new Task(2, 2, "taxi-validator");
+
+        Task aggregator1 = new Task(3, 0, "taxi-aggregator");
+        Task aggregator2 = new Task(3, 1, "taxi-aggregator");
+        Task aggregator3 = new Task(3, 2, "taxi-aggregator");
+
+        Task anomaly1 = new Task(4, 0, "taxi-anomaly");
+        Task anomaly2 = new Task(4, 1, "taxi-anomaly");
+
+        Task output1 = new Task(5, 0, "taxi-output");
+        Task output2 = new Task(5, 1, "taxi-output");
+
+        // Add all tasks to the DAG
+        for (Task t : new Task[]{
+                reader1, reader2,
+                validator1, validator2, validator3,
+                aggregator1, aggregator2, aggregator3,
+                anomaly1, anomaly2,
+                output1, output2}) {
+            taxiApp.addTask(t);
+        }
+
+        // Add edges (reader → validator, HIGH Tr expected)
+        for (Task r : new Task[]{reader1, reader2}) {
+            for (Task v : new Task[]{validator1, validator2, validator3}) {
+                taxiApp.addEdge(new Edge(r, v));
+            }
+        }
+        // validator → aggregator
+        for (Task v : new Task[]{validator1, validator2, validator3}) {
+            for (Task a : new Task[]{aggregator1, aggregator2, aggregator3}) {
+                taxiApp.addEdge(new Edge(v, a));
+            }
+        }
+        // aggregator → anomaly (LOW Tr) and → output
+        for (Task a : new Task[]{aggregator1, aggregator2, aggregator3}) {
+            for (Task an : new Task[]{anomaly1, anomaly2}) {
+                taxiApp.addEdge(new Edge(a, an));
+            }
+            for (Task o : new Task[]{output1, output2}) {
+                taxiApp.addEdge(new Edge(a, o));
+            }
+        }
+
+        // --- Wire DataMonitor to the Taxi DAG ---
+        CommunicationModel commModel = new CommunicationModel();
+        ResourceModel resModel = new ResourceModel();
+        // DataMonitor is registered as a Storm IMetricsConsumer in the Config
+        // (see TopologyRunner / ClusterTopologyRunner). We construct it here
+        // so the reference is available; Storm will call prepare() on it.
+        DataMonitor monitor = new DataMonitor(taxiApp, commModel, resModel);
+
+        // --- Build the Storm topology ---
         TopologyBuilder builder = new TopologyBuilder();
 
         // v1: reader spout — 2 tasks
-        builder.setSpout("taxi-reader",
-                new TaxiSpout(), 2);
+        builder.setSpout("taxi-reader", new TaxiSpout(), 2);
 
         // v2: validator — 3 tasks, HIGH Tr with spout
-        // shuffleGrouping = spread load across validator tasks
-        builder.setBolt("taxi-validator",
-                        new ValidatorBolt(), 3)
+        builder.setBolt("taxi-validator", new ValidatorBolt(), 3)
                 .shuffleGrouping("taxi-reader");
 
         // v3: aggregator — 3 tasks
-        // fieldsGrouping on pickupZone = same zone → same task
-        // This is REQUIRED for correct aggregation
-        builder.setBolt("taxi-aggregator",
-                        new AggregateBolt(), 3)
-                .fieldsGrouping("taxi-validator",
-                        new Fields("pickupZone"));
+        // fieldsGrouping on pickupZone ensures same zone → same task (correctness)
+        builder.setBolt("taxi-aggregator", new AggregateBolt(), 3)
+                .fieldsGrouping("taxi-validator", new Fields("pickupZone"));
 
         // v4: anomaly detector — 2 tasks, LOW Tr
-        builder.setBolt("taxi-anomaly",
-                        new AnomalyBolt(), 2)
+        builder.setBolt("taxi-anomaly", new AnomalyBolt(), 2)
                 .shuffleGrouping("taxi-aggregator");
 
         // v5: output — 2 tasks
-        builder.setBolt("taxi-output",
-                        new OutputBolt(), 2)
+        builder.setBolt("taxi-output", new OutputBolt(), 2)
                 .shuffleGrouping("taxi-aggregator");
 
         return builder;

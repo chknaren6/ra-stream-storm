@@ -8,7 +8,10 @@ import org.apache.storm.topology.TopologyBuilder;
 public class TopologyRunner {
 
     public static void main(String[] args) throws Exception {
+
         runTaxi();
+
+
     }
 
     public static void runTaxi() throws Exception {
