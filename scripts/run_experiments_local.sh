@@ -1,48 +1,44 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-MODE="${1:-dense}"   # smoke | quick | dense | full
+cd "$(dirname "$0")/.."
+
 mkdir -p results/raw-data results/plots results/analysis
 mvn -q -DskipTests compile
 
-case "$MODE" in
-  smoke)
-    DURATION=60
-    RATES=(1000)
-    REPEATS=1
-    ;;
-  quick)
-    DURATION=180
-    RATES=(1000 3000)
-    REPEATS=1
-    ;;
-  dense)
-    DURATION=300
-    RATES=(1000 2000 3000 4000 5000 6000 7000)
-    REPEATS=2
-    ;;
-  full)
-    DURATION=3600
-    RATES=(1000 2000 3000 4000 5000 6000 7000)
-    REPEATS=3
-    ;;
-  *)
-    echo "Usage: $0 [smoke|quick|dense|full]"
-    exit 1
-    ;;
-esac
+# 🔥 Ultra-dense + ultra-fast
+DURATION=5
+RATES=$(seq 1000 50 7000)   # VERY dense (every 50 → super smooth curves)
+REPEATS=1
+PARALLEL=10                 # increase if CPU allows
 
 CONFIGS=(BasicProcessor EvenScheduler RaStream RaStreamFT RaStreamEnhanced)
 
-for rep in $(seq 1 $REPEATS); do
-  for cfg in "${CONFIGS[@]}"; do
-    for rate in "${RATES[@]}"; do
-      echo "[RUN] mode=$MODE rep=$rep cfg=$cfg rate=$rate duration=${DURATION}s"
-      mvn -q -DskipTests exec:java \
-        -Dexec.mainClass="com.rastream.experiments.StableStreamExperiment" \
-        -Dexec.args="$rate $DURATION ${cfg}_rep${rep}"
-    done
-  done
-done
+run_job() {
+  rep=$1
+  cfg=$2
+  rate=$3
 
-echo "[DONE] mode=$MODE"
+  echo "[RUN] cfg=$cfg rate=$rate"
+
+  mvn -q -DskipTests exec:java \
+    -Dexec.mainClass="com.rastream.experiments.StableStreamExperiment" \
+    -Dexec.args="$rate $DURATION ${cfg}" \
+    >> results/raw-data/${cfg}_rate${rate}.log 2>&1
+}
+
+export -f run_job
+
+# Quick warmup
+mvn -q -DskipTests exec:java \
+  -Dexec.mainClass="com.rastream.experiments.StableStreamExperiment" \
+  -Dexec.args="2000 5 warmup" >/dev/null 2>&1
+
+# Generate jobs
+for cfg in "${CONFIGS[@]}"; do
+  for rate in $RATES; do
+    echo "1 $cfg $rate"
+  done
+done | xargs -n 3 -P $PARALLEL bash -c 'run_job "$@"' _
+
+echo "[DONE] Ultra-dense 5s runs completed."
