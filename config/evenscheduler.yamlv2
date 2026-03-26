@@ -1,0 +1,6 @@
+scheduler:
+  mode: EVEN
+  randomPlacement: true
+  staticAllocation: true
+  considerLoad: false
+  considerLocality: false

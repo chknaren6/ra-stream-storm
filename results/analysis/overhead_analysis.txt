@@ -1,0 +1,3 @@
+RaStream avg latency: 0.134365 ms
+RaStreamFT avg latency: 0.161674 ms
+Latency overhead (%): 20.3249

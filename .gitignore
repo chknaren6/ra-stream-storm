@@ -29,3 +29,6 @@ docker/volumes/
 # OS
 .DS_Store
 Thumbs.db
+.venv/
+__pycache__/
+*.pyc

@@ -1,0 +1,6 @@
+experiments:
+  durationSec: 3600
+  collectIntervalSec: 10
+  stableRates: [1000,2000,3000,4000,5000]
+  fullRates: [1000,2000,3000,4000,5000,6000,7000]
+  scalabilityNodes: [5,7,9,11,13,15]

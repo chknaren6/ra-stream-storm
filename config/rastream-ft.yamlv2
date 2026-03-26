@@ -1,0 +1,9 @@
+faultTolerance:
+  heartbeatMs: 500
+  missedHeartbeats: 3
+  checkpointSeconds: 10
+  checkpointTuples: 10000
+fastLogger:
+  ringBufferSize: 65536
+  batchSize: 1024
+  flushMs: 50
