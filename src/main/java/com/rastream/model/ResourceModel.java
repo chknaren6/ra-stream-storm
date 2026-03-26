@@ -43,6 +43,14 @@ public class ResourceModel {
         this.nodeMemUtilization = mem;
         this.nodeIoUtilization  = io;
     }
+    private double nodeNetUtilization;
+    public void updateNodeUtilization(double cpu, double mem, double io, double net) {
+        this.nodeCpuUtilization = cpu;
+        this.nodeMemUtilization = mem;
+        this.nodeIoUtilization = io;
+        this.nodeNetUtilization = net;
+    }
+    public double getNodeNetUtilization() { return nodeNetUtilization; }
 
     // Record how many tuples task processed in window st
     // This is num_v_i,k_st in the paper

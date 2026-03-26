@@ -88,6 +88,20 @@ public class DataMonitor implements IMetricsConsumer {
                         Object registrationArgument,
                         TopologyContext context,
                         IErrorReporter errorReporter) {
+        // inside prepare(...), before scheduleAtFixedRate(...)
+        metricsTracker.registerComponentVertex("reader", 1);
+        metricsTracker.registerComponentVertex("spout", 1);
+
+        metricsTracker.registerComponentVertex("taxi-reader", 1);
+        metricsTracker.registerComponentVertex("split", 2);
+        metricsTracker.registerComponentVertex("validator", 2);
+        metricsTracker.registerComponentVertex("taxi-validator", 2);
+        metricsTracker.registerComponentVertex("count", 3);
+        metricsTracker.registerComponentVertex("aggregator", 3);
+        metricsTracker.registerComponentVertex("taxi-aggregator", 3);
+        metricsTracker.registerComponentVertex("output", 4);
+        metricsTracker.registerComponentVertex("taxi-output", 5);
+        metricsTracker.registerComponentVertex("taxi-anomaly", 4);
         scheduler.scheduleAtFixedRate(
                 this::sampleWindow,
                 STAT_WINDOW_SEC,

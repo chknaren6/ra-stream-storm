@@ -11,7 +11,7 @@ import java.util.List;
 
 public class ResourceScaler {
 
-    // T_under = 0.60, T_over = 0.75
+    // Paper thresholds (Table 4)
     private final double tUnder;
     private final double tOver;
     private final ResourceModel resourceModel;
@@ -22,43 +22,31 @@ public class ResourceScaler {
         this.resourceModel = resourceModel;
     }
 
-    // Eq 21
-    // True if R < T_under (wasteful) or R > T_over (overloaded)
-    private boolean needsAdjustment(Subgraph s) {
-        double R = resourceModel.computeSubgraphResourceDemand(
-                s.getTasks());
-        return (R < tUnder) || (R > tOver);
-    }
-
     private boolean isUnderloaded(Subgraph s) {
-        double R = resourceModel.computeSubgraphResourceDemand(
-                s.getTasks());
-        return R < tUnder;
+        double r = resourceModel.computeSubgraphResourceDemand(s.getTasks());
+        return r < tUnder;
     }
 
     private boolean isOverloaded(Subgraph s) {
-        double R = resourceModel.computeSubgraphResourceDemand(
-                s.getTasks());
-        return R > tOver;
+        double r = resourceModel.computeSubgraphResourceDemand(s.getTasks());
+        return r > tOver;
     }
-    // Try to find a subgraph to merge with target
-    // Merge is valid if combined resource demand <= T_over
-    private Subgraph findMergeCandidate(Subgraph target,
-                                        List<Subgraph> available) {
-        double targetR = resourceModel
-                .computeSubgraphResourceDemand(target.getTasks());
 
-        // Binary search substitute: find best fit candidate
-        // whose combined demand stays under T_over
+    /**
+     * Merge candidate for underloaded subgraph:
+     * choose candidate with max utilization that still keeps merged <= tOver.
+     */
+    private Subgraph findMergeCandidate(Subgraph target, List<Subgraph> available) {
+        double targetR = resourceModel.computeSubgraphResourceDemand(target.getTasks());
+
         Subgraph best = null;
-        double bestCombined = Double.MAX_VALUE;
+        double bestCombined = -1.0;
 
         for (Subgraph candidate : available) {
             if (candidate.getId() == target.getId()) continue;
-            double candidateR = resourceModel
-                    .computeSubgraphResourceDemand(candidate.getTasks());
+            double candidateR = resourceModel.computeSubgraphResourceDemand(candidate.getTasks());
             double combined = targetR + candidateR;
-            if (combined <= tOver && combined < bestCombined) {
+            if (combined <= tOver && combined > bestCombined) {
                 best = candidate;
                 bestCombined = combined;
             }
@@ -66,7 +54,6 @@ public class ResourceScaler {
         return best;
     }
 
-    // Merge two subgraphs into one
     private Subgraph mergeSubgraphs(Subgraph a, Subgraph b) {
         Subgraph merged = new Subgraph(a.getId());
         for (Task t : a.getTasks()) merged.addTask(t);
@@ -74,15 +61,14 @@ public class ResourceScaler {
         return merged;
     }
 
-    // Find task with minimal impact on source subgraph weight
-    // minimal impact = task involved in fewest internal edges
-    private Task findMinImpactTask(Subgraph source,
-                                   List<com.rastream.dag.Edge> allEdges) {
-        Task minTask   = null;
-        int  minEdges  = Integer.MAX_VALUE;
+    /**
+     * Minimal impact = fewest internal edges touched.
+     */
+    private Task findMinImpactTask(Subgraph source) {
+        Task minTask = null;
+        int minEdges = Integer.MAX_VALUE;
 
         for (Task t : source.getTasks()) {
-            // Count how many internal edges this task participates in
             int edgeCount = 0;
             for (com.rastream.dag.Edge e : source.getInternalEdges()) {
                 if (e.getSource().getId().equals(t.getId()) ||
@@ -92,112 +78,140 @@ public class ResourceScaler {
             }
             if (edgeCount < minEdges) {
                 minEdges = edgeCount;
-                minTask  = t;
+                minTask = t;
             }
         }
         return minTask;
     }
 
-    // Find a subgraph that can absorb one more task
-    private Subgraph findTaskAdjustCandidate(Subgraph target,
-                                             List<Subgraph> available) {
-        for (Subgraph candidate : available) {
-            if (candidate.getId() == target.getId()) continue;
-            double R = resourceModel.computeSubgraphResourceDemand(
-                    candidate.getTasks());
-            // Must have room below T_over
-            if (R < tOver) return candidate;
+    /**
+     * For underloaded target, pick a donor (not target, >1 task).
+     * Prefer the donor with highest current resource demand to converge quickly.
+     */
+    private Subgraph findDonorCandidateForUnderloaded(Subgraph target, List<Subgraph> available) {
+        Subgraph best = null;
+        double bestR = -1.0;
+        for (Subgraph donor : available) {
+            if (donor.getId() == target.getId()) continue;
+            if (donor.getTaskCount() <= 1) continue;
+            double r = resourceModel.computeSubgraphResourceDemand(donor.getTasks());
+            if (r > bestR) {
+                best = donor;
+                bestR = r;
+            }
         }
-        return null;
+        return best;
     }
 
-    // Algorithm 2 — full resource scaling
-    // Input:  partition scheme X from Algorithm 1
-    // Output: resource scaling scheme RS
-    //         number of subgraphs in RS = minimum nodes needed
-    public List<Subgraph> scale(PartitionScheme X,
+    /**
+     * For overloaded source, find receiver where receiverR + taskR <= tOver.
+     * Prefer receiver with highest current utilization that still fits.
+     */
+    private Subgraph findReceiverCandidateForOverloaded(Subgraph source,
+                                                        Task taskToMove,
+                                                        List<Subgraph> available) {
+        double taskR = resourceModel.computeTaskResourceUtilization(taskToMove);
+
+        Subgraph best = null;
+        double bestReceiverR = -1.0;
+
+        for (Subgraph receiver : available) {
+            if (receiver.getId() == source.getId()) continue;
+            double receiverR = resourceModel.computeSubgraphResourceDemand(receiver.getTasks());
+            if (receiverR + taskR <= tOver && receiverR > bestReceiverR) {
+                best = receiver;
+                bestReceiverR = receiverR;
+            }
+        }
+        return best;
+    }
+
+    /**
+     * Algorithm 2 — resource scaling.
+     */
+    public List<Subgraph> scale(PartitionScheme x,
                                 List<com.rastream.dag.Edge> allEdges) {
 
-        // Working list — sorted ascending by resource demand
-        List<Subgraph> working = new ArrayList<>(
-                X.getSubgraphs());
+        List<Subgraph> working = new ArrayList<>(x.getSubgraphs());
         working.sort(Comparator.comparingDouble(s ->
-                resourceModel.computeSubgraphResourceDemand(
-                        s.getTasks())));
+                resourceModel.computeSubgraphResourceDemand(s.getTasks())));
 
-        // Output list RS
-        List<Subgraph> RS = new ArrayList<>();
+        List<Subgraph> rs = new ArrayList<>();
 
         int i = 0;
         while (i < working.size()) {
             Subgraph current = working.get(i);
-            double R = resourceModel.computeSubgraphResourceDemand(
-                    current.getTasks());
+            double r = resourceModel.computeSubgraphResourceDemand(current.getTasks());
 
-            //  UNDERLOADED branch
-            if (R < tUnder) {
-                Subgraph mergeTarget =
-                        findMergeCandidate(current, working);
-
+            // UNDERLOADED
+            if (r < tUnder) {
+                Subgraph mergeTarget = findMergeCandidate(current, working);
                 if (mergeTarget != null) {
-                    //  merge and add to RS
-                    Subgraph merged =
-                            mergeSubgraphs(current, mergeTarget);
+                    Subgraph merged = mergeSubgraphs(current, mergeTarget);
                     merged.recomputeInternalEdges(allEdges);
-                    RS.add(merged);
+
+                    rs.add(merged);
                     working.remove(mergeTarget);
-                    System.out.println("Merged subgraph "
-                            + current.getId() + " with "
-                            + mergeTarget.getId());
+
+                    System.out.println("[ResourceScaler] Merged subgraph "
+                            + current.getId() + " with " + mergeTarget.getId());
                 } else {
-                    // move tasks in until above T_under
-                    while (isUnderloaded(current)
-                            && current.getTaskCount() > 1) {
-                        Subgraph donor =
-                                findTaskAdjustCandidate(current, working);
+                    // Pull tasks from donors until >= tUnder or no valid move
+                    while (isUnderloaded(current) && current.getTaskCount() >= 1) {
+                        Subgraph donor = findDonorCandidateForUnderloaded(current, working);
                         if (donor == null) break;
-                        Task taskToMove =
-                                findMinImpactTask(donor, allEdges);
+
+                        Task taskToMove = findMinImpactTask(donor);
                         if (taskToMove == null) break;
+
                         donor.removeTask(taskToMove);
                         current.addTask(taskToMove);
+
+                        donor.recomputeInternalEdges(allEdges);
                         current.recomputeInternalEdges(allEdges);
-                        System.out.println("Moved task "
+
+                        System.out.println("[ResourceScaler] Moved task "
                                 + taskToMove.getId()
-                                + " into subgraph " + current.getId());
+                                + " donor=" + donor.getId()
+                                + " -> current=" + current.getId());
+
+                        if (donor.getTaskCount() == 0) break;
                     }
-                    RS.add(current);
+                    rs.add(current);
                 }
 
-                // OVERLOADED branch
-            } else if (R > tOver) {
-                while (isOverloaded(current)
-                        && current.getTaskCount() > 1) {
-                    Subgraph receiver =
-                            findTaskAdjustCandidate(current, working);
-                    if (receiver == null) break;
-                    Task taskToMove =
-                            findMinImpactTask(current, allEdges);
+                // OVERLOADED
+            } else if (r > tOver) {
+                while (isOverloaded(current) && current.getTaskCount() > 1) {
+                    Task taskToMove = findMinImpactTask(current);
                     if (taskToMove == null) break;
+
+                    Subgraph receiver = findReceiverCandidateForOverloaded(current, taskToMove, working);
+                    if (receiver == null) break;
+
                     current.removeTask(taskToMove);
                     receiver.addTask(taskToMove);
-                    current.recomputeInternalEdges(allEdges);
-                    System.out.println("Moved task "
-                            + taskToMove.getId()
-                            + " out of subgraph " + current.getId());
-                }
-                RS.add(current);
 
-                // JUST RIGHT branch
+                    current.recomputeInternalEdges(allEdges);
+                    receiver.recomputeInternalEdges(allEdges);
+
+                    System.out.println("[ResourceScaler] Moved task "
+                            + taskToMove.getId()
+                            + " current=" + current.getId()
+                            + " -> receiver=" + receiver.getId());
+                }
+                rs.add(current);
+
+                // JUST RIGHT
             } else {
-                RS.add(current);
+                rs.add(current);
             }
+
             i++;
         }
 
-        System.out.println("Resource scaling done: "
-                + RS.size() + " compute nodes needed");
-        return RS;
+        System.out.println("[ResourceScaler] Done. Compute nodes needed = " + rs.size());
+        return rs;
     }
 
     public double getTUnder() { return tUnder; }

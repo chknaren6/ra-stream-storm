@@ -10,102 +10,117 @@ import java.util.concurrent.atomic.AtomicReference;
 /**
  * Reads real system resource metrics from Linux /proc filesystem.
  *
- * Implements the node-level utilization readings used in Equations 3-6:
- *   U_cpu_cn,st  — from /proc/stat
- *   U_mem_cn,st  — from /proc/meminfo
- *   U_io_cn,st   — from /proc/diskstats
- *
- * Returns double[3] = { cpuUtil, memUtil, ioUtil } in range [0.0, 1.0]
- * On non-Linux systems (no /proc), returns {0.0, 0.0, 0.0} gracefully.
- *
- * Thread-safe: uses AtomicReference for the cached snapshot so multiple
- * threads calling readSystemMetrics() never race on the file handles.
+ * Returns:
+ * - readSystemMetrics(): [cpuUtil, memUtil, ioUtil]
+ * - readNetworkMetrics(): [rxBytesPerSec, txBytesPerSec, netUtil]
  */
 public class ProcfsMetricsReader {
 
-    // /proc paths — package-private for unit testing with mocks
-    static final String PROC_STAT     = "/proc/stat";
-    static final String PROC_MEMINFO  = "/proc/meminfo";
+    static final String PROC_STAT      = "/proc/stat";
+    static final String PROC_MEMINFO   = "/proc/meminfo";
     static final String PROC_DISKSTATS = "/proc/diskstats";
+    static final String PROC_NET_DEV   = "/proc/net/dev";
 
-    // Whether this JVM is running on a Linux host with /proc available
     private final boolean procAvailable;
 
-    // Cache: last raw CPU tick snapshot for delta calculation
-    // long[7] = { user, nice, system, idle, iowait, irq, softirq }
-    private long[] lastCpuTicks = null;
+    // CPU cache
+    private long[] lastCpuTicks = null; // user,nice,system,idle,iowait,irq,softirq
 
-    // Cache: last raw I/O byte snapshot for delta calculation
-    // long[2] = { totalReadBytes, totalWriteBytes }
-    private long[] lastIoBytes = null;
+    // IO cache
+    private long[] lastIoBytes = null; // read,write
 
-    // Last snapshot timestamp (ms) — used to scale I/O bytes → utilization
-    private long lastSnapshotMs = 0;
+    // NET cache
+    private long[] lastNetBytes = null; // rx,tx
 
-    // Cached result from the most recent read — returned if /proc read fails
-    private final AtomicReference<double[]> lastGoodMetrics =
+    // shared timestamp cache for delta-based metrics
+    private long lastSnapshotMs = 0L;
+    private long lastNetSnapshotMs = 0L;
+
+    // last good snapshots
+    private final AtomicReference<double[]> lastGoodSystemMetrics =
+            new AtomicReference<>(new double[]{0.0, 0.0, 0.0});
+
+    private final AtomicReference<double[]> lastGoodNetworkMetrics =
             new AtomicReference<>(new double[]{0.0, 0.0, 0.0});
 
     public ProcfsMetricsReader() {
-        this.procAvailable = Files.exists(Paths.get(PROC_STAT));
+        this.procAvailable = Files.exists(Paths.get(PROC_STAT))
+                && Files.exists(Paths.get(PROC_MEMINFO))
+                && Files.exists(Paths.get(PROC_DISKSTATS));
         if (!procAvailable) {
-            System.out.println("[ProcfsMetricsReader] /proc not available "
-                    + "(non-Linux?). Will return 0.0 for all metrics.");
+            System.out.println("[ProcfsMetricsReader] /proc not fully available. Returning zeros.");
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Public API
-    // -----------------------------------------------------------------------
-
     /**
-     * Read current system metrics.
-     *
-     * @return double[3]: [0] = CPU utilization  (0.0–1.0)
-     *                    [1] = Memory utilization (0.0–1.0)
-     *                    [2] = I/O utilization    (0.0–1.0, clamped)
+     * @return [cpuUtil, memUtil, ioUtil] in [0,1]
      */
     public double[] readSystemMetrics() {
-        if (!procAvailable) {
-            return new double[]{0.0, 0.0, 0.0};
-        }
+        if (!procAvailable) return new double[]{0.0, 0.0, 0.0};
         try {
             double cpu = readCpuUtilization();
             double mem = readMemoryUtilization();
-            double io  = readIoUtilization();
+            double io = readIoUtilization();
 
-            double[] result = {cpu, mem, io};
-            lastGoodMetrics.set(result);
-            return result;
-
+            double[] v = new double[]{cpu, mem, io};
+            lastGoodSystemMetrics.set(v);
+            return v;
         } catch (Exception e) {
-            System.err.println("[ProcfsMetricsReader] Read error: " + e.getMessage());
-            // Return last known-good values rather than crashing the window
-            return lastGoodMetrics.get();
+            System.err.println("[ProcfsMetricsReader] System read error: " + e.getMessage());
+            return lastGoodSystemMetrics.get();
         }
     }
 
-    // -----------------------------------------------------------------------
-    // CPU — /proc/stat
-    // -----------------------------------------------------------------------
-
     /**
-     * Parses /proc/stat "cpu" aggregate line.
-     *
-     * Format: cpu  user nice system idle iowait irq softirq [steal guest]
-     * All values are cumulative jiffies since boot.
-     *
-     * Utilization = (active_delta) / (total_delta)
-     * where active = user + nice + system + irq + softirq
-     *       idle   = idle + iowait
-     *
-     * Returns value in [0.0, 1.0].
+     * @return [rxBytesPerSec, txBytesPerSec, netUtil(0..1)]
      */
+    public double[] readNetworkMetrics() {
+        if (!Files.exists(Paths.get(PROC_NET_DEV))) {
+            return new double[]{0.0, 0.0, 0.0};
+        }
+        try {
+            long nowMs = System.currentTimeMillis();
+            long[] cur = parseNetDevBytes();
+
+            if (lastNetBytes == null || lastNetSnapshotMs == 0) {
+                lastNetBytes = cur;
+                lastNetSnapshotMs = nowMs;
+                return new double[]{0.0, 0.0, 0.0};
+            }
+
+            long elapsedMs = nowMs - lastNetSnapshotMs;
+            if (elapsedMs <= 0) return new double[]{0.0, 0.0, 0.0};
+
+            long rxDelta = cur[0] - lastNetBytes[0];
+            long txDelta = cur[1] - lastNetBytes[1];
+
+            double rxBps = Math.max(0.0, rxDelta / (elapsedMs / 1000.0));
+            double txBps = Math.max(0.0, txDelta / (elapsedMs / 1000.0));
+
+            // Normalize against 1Gbps link budget (125 MB/s)
+            // adjust this reference if your NIC differs
+            double refBytesPerSec = 125_000_000.0;
+            double util = Math.min(1.0, Math.max(0.0, (rxBps + txBps) / refBytesPerSec));
+
+            lastNetBytes = cur;
+            lastNetSnapshotMs = nowMs;
+
+            double[] v = new double[]{rxBps, txBps, util};
+            lastGoodNetworkMetrics.set(v);
+            return v;
+
+        } catch (Exception e) {
+            System.err.println("[ProcfsMetricsReader] Network read error: " + e.getMessage());
+            return lastGoodNetworkMetrics.get();
+        }
+    }
+
+    // ---------------- CPU ----------------
+
     double readCpuUtilization() throws IOException {
         long[] ticks = parseCpuTicks();
 
         if (lastCpuTicks == null) {
-            // First call — no delta yet, snapshot and return 0
             lastCpuTicks = ticks;
             return 0.0;
         }
@@ -121,20 +136,18 @@ public class ProcfsMetricsReader {
         lastCpuTicks = ticks;
 
         long active = userDelta + niceDelta + systemDelta + irqDelta + softirqDelta;
-        long total  = active + idleDelta + iowaitDelta;
+        long total = active + idleDelta + iowaitDelta;
 
         if (total <= 0) return 0.0;
-        return Math.min(1.0, (double) active / total);
+        return Math.min(1.0, Math.max(0.0, (double) active / total));
     }
 
     private long[] parseCpuTicks() throws IOException {
         try (BufferedReader br = new BufferedReader(new FileReader(PROC_STAT))) {
             String line;
             while ((line = br.readLine()) != null) {
-                if (line.startsWith("cpu ")) {   // aggregate line (space after "cpu")
+                if (line.startsWith("cpu ")) {
                     String[] parts = line.trim().split("\\s+");
-                    // parts[0]="cpu", parts[1]=user, [2]=nice, [3]=system,
-                    // [4]=idle, [5]=iowait, [6]=irq, [7]=softirq
                     long[] ticks = new long[7];
                     for (int i = 0; i < 7; i++) {
                         ticks[i] = Long.parseLong(parts[i + 1]);
@@ -143,22 +156,13 @@ public class ProcfsMetricsReader {
                 }
             }
         }
-        throw new IOException("Could not find 'cpu ' line in " + PROC_STAT);
+        throw new IOException("Cannot find cpu aggregate line in " + PROC_STAT);
     }
 
-    // -----------------------------------------------------------------------
-    // Memory — /proc/meminfo
-    // -----------------------------------------------------------------------
+    // ---------------- MEM ----------------
 
-    /**
-     * Parses /proc/meminfo for MemTotal and MemAvailable.
-     *
-     * utilization = (MemTotal - MemAvailable) / MemTotal
-     *
-     * Returns value in [0.0, 1.0].
-     */
     double readMemoryUtilization() throws IOException {
-        long memTotalKb     = -1;
+        long memTotalKb = -1;
         long memAvailableKb = -1;
 
         try (BufferedReader br = new BufferedReader(new FileReader(PROC_MEMINFO))) {
@@ -177,96 +181,65 @@ public class ProcfsMetricsReader {
         if (memAvailableKb < 0) memAvailableKb = 0;
 
         long usedKb = memTotalKb - memAvailableKb;
-        return Math.min(1.0, (double) usedKb / memTotalKb);
+        return Math.min(1.0, Math.max(0.0, (double) usedKb / memTotalKb));
     }
 
-    /** Extract the numeric kB value from a /proc/meminfo line like "MemTotal: 2048000 kB" */
     private long parseKbValue(String line) {
-        String[] parts = line.trim().split("\\s+");
-        // parts[0] = "MemTotal:", parts[1] = "2048000", parts[2] = "kB"
-        if (parts.length >= 2) {
-            try { return Long.parseLong(parts[1]); }
-            catch (NumberFormatException e) { /* fall through */ }
+        String[] p = line.trim().split("\\s+");
+        if (p.length >= 2) {
+            try { return Long.parseLong(p[1]); } catch (Exception ignored) {}
         }
         return 0;
     }
 
-    // -----------------------------------------------------------------------
-    // I/O — /proc/diskstats
-    // -----------------------------------------------------------------------
+    // ---------------- IO ----------------
 
-    /**
-     * Parses /proc/diskstats to sum read + write sectors across all physical disks.
-     *
-     * /proc/diskstats columns (kernel 2.6+):
-     *   major minor name reads_completed ... sectors_read ... writes_completed ... sectors_written ...
-     *   Column indices (0-based):  0=major, 1=minor, 2=name,
-     *   3=reads_completed, 5=sectors_read, 7=writes_completed, 9=sectors_written
-     *
-     * We track delta sectors * 512 bytes = bytes transferred, then normalise
-     * by elapsed time to get bytes/sec. We cap at a reference bandwidth
-     * (100 MB/s = typical spinning disk) to produce a [0.0, 1.0] utilization.
-     *
-     * Only physical disk devices are counted (name matches sd*, vd*, hd*, nvme*).
-     */
     double readIoUtilization() throws IOException {
         long nowMs = System.currentTimeMillis();
         long[] currentIo = parseDiskstats();
 
         if (lastIoBytes == null || lastSnapshotMs == 0) {
-            lastIoBytes     = currentIo;
-            lastSnapshotMs  = nowMs;
+            lastIoBytes = currentIo;
+            lastSnapshotMs = nowMs;
             return 0.0;
         }
 
-        long readDelta  = currentIo[0] - lastIoBytes[0];
+        long readDelta = currentIo[0] - lastIoBytes[0];
         long writeDelta = currentIo[1] - lastIoBytes[1];
-        long elapsedMs  = nowMs - lastSnapshotMs;
+        long elapsedMs = nowMs - lastSnapshotMs;
 
-        lastIoBytes    = currentIo;
+        lastIoBytes = currentIo;
         lastSnapshotMs = nowMs;
 
         if (elapsedMs <= 0) return 0.0;
 
-        // Total bytes transferred in the window
         long totalBytes = readDelta + writeDelta;
+        double bytesPerSec = totalBytes / (elapsedMs / 1000.0);
 
-        // Reference: 100 MB/s = typical spinning disk full-speed
-        // Normalise: util = bytesPerSec / 100_000_000
-        double bytesPerSec = (double) totalBytes / (elapsedMs / 1000.0);
+        // normalize using 100MB/s reference
         double util = bytesPerSec / 100_000_000.0;
-
         return Math.min(1.0, Math.max(0.0, util));
     }
 
-    /**
-     * Returns long[2] = { total_read_bytes, total_write_bytes } across all physical disks.
-     * Sectors are multiplied by 512 to get bytes.
-     */
     private long[] parseDiskstats() throws IOException {
-        long totalReadBytes  = 0;
-        long totalWriteBytes = 0;
+        long totalReadBytes = 0L;
+        long totalWriteBytes = 0L;
 
         try (BufferedReader br = new BufferedReader(new FileReader(PROC_DISKSTATS))) {
             String line;
             while ((line = br.readLine()) != null) {
                 String[] p = line.trim().split("\\s+");
-                // Need at least 10 columns
                 if (p.length < 10) continue;
 
                 String devName = p[2];
-
-                // Only count physical block devices: sda, vda, hda, nvme0n1, xvda, etc.
-                // Skip partitions (sda1, sda2), loop devices, ram disks
                 if (!isPhysicalDisk(devName)) continue;
 
                 try {
-                    long sectorsRead    = Long.parseLong(p[5]);
+                    long sectorsRead = Long.parseLong(p[5]);
                     long sectorsWritten = Long.parseLong(p[9]);
-                    totalReadBytes  += sectorsRead    * 512L;
+                    totalReadBytes += sectorsRead * 512L;
                     totalWriteBytes += sectorsWritten * 512L;
-                } catch (NumberFormatException e) {
-                    // Malformed line — skip
+                } catch (NumberFormatException ignored) {
                 }
             }
         }
@@ -274,26 +247,55 @@ public class ProcfsMetricsReader {
         return new long[]{totalReadBytes, totalWriteBytes};
     }
 
-    /**
-     * Returns true for physical block devices we want to track.
-     * Excludes partitions (sda1), loop (loop0), ram (ram0), dm-* (LVM).
-     */
     private boolean isPhysicalDisk(String name) {
         if (name == null || name.isEmpty()) return false;
-        // Match: sda, sdb, vda, hda, xvda, nvme0n1 — but NOT sda1, nvme0n1p1
-        if (name.matches("sd[a-z]"))            return true;  // SCSI/SATA
-        if (name.matches("vd[a-z]"))            return true;  // VirtIO
-        if (name.matches("hd[a-z]"))            return true;  // IDE
-        if (name.matches("xvd[a-z]"))           return true;  // Xen VBD
-        if (name.matches("nvme\\d+n\\d+"))      return true;  // NVMe (no partition suffix)
+        if (name.matches("sd[a-z]")) return true;
+        if (name.matches("vd[a-z]")) return true;
+        if (name.matches("hd[a-z]")) return true;
+        if (name.matches("xvd[a-z]")) return true;
+        if (name.matches("nvme\\d+n\\d+")) return true;
         return false;
     }
 
-    // -----------------------------------------------------------------------
-    // Utility
-    // -----------------------------------------------------------------------
+    // ---------------- NET ----------------
 
-    /** @return true if running on a Linux system with /proc available */
+    /**
+     * @return [totalRxBytes, totalTxBytes] for non-loopback interfaces.
+     */
+    private long[] parseNetDevBytes() throws IOException {
+        long rx = 0L;
+        long tx = 0L;
+
+        try (BufferedReader br = new BufferedReader(new FileReader(PROC_NET_DEV))) {
+            String line;
+            int lineNo = 0;
+            while ((line = br.readLine()) != null) {
+                lineNo++;
+                if (lineNo <= 2) continue; // skip headers
+
+                String[] split = line.trim().split(":");
+                if (split.length != 2) continue;
+
+                String iface = split[0].trim();
+                if (iface.equals("lo")) continue; // skip loopback
+
+                String[] cols = split[1].trim().split("\\s+");
+                // format: receive bytes is cols[0], transmit bytes is cols[8]
+                if (cols.length < 9) continue;
+
+                try {
+                    long ifaceRx = Long.parseLong(cols[0]);
+                    long ifaceTx = Long.parseLong(cols[8]);
+                    rx += ifaceRx;
+                    tx += ifaceTx;
+                } catch (NumberFormatException ignored) {
+                }
+            }
+        }
+
+        return new long[]{rx, tx};
+    }
+
     public boolean isProcAvailable() {
         return procAvailable;
     }
