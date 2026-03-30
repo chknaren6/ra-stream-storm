@@ -12,7 +12,6 @@ data/
 *.xml.bz2
 
 # Metrics output — generated at runtime
-metrics/
 
 # IDE
 .idea/
