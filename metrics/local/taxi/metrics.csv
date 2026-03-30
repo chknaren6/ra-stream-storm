@@ -1,0 +1,23 @@
+timestamp,scheduler,topology,stream_rate_tps,avg_latency_ms,max_latency_ms,min_latency_ms,throughput_tps,tuple_count,node_count,avg_cpu_pct,avg_mem_pct,stage,notes
+Round Robin, Round Robin, Round Robin, Round Robin, Round Robin, Round Robin, Round Robin, Round Robin, Round Robin, Round Robin, Round Robin, Round Robin, Round Robin, Round Robin
+2026-03-22 11:28:56,Round Robin,TaxiNYC,1000,1.50,4.00,0.00,19.50,812,1,0.0,0.0,local,ramp_up_rate=1000
+2026-03-22 11:29:26,Round Robin,TaxiNYC,2000,2.86,30.00,0.00,22.18,1589,1,0.0,0.0,local,ramp_up_rate=2000
+2026-03-22 11:29:56,Round Robin,TaxiNYC,3000,2.33,30.00,0.00,23.33,2371,1,0.0,0.0,local,ramp_up_rate=3000
+2026-03-22 11:30:26,Round Robin,TaxiNYC,5000,2.05,30.00,0.00,23.94,3152,1,0.0,0.0,local,ramp_up_rate=5000
+2026-03-22 11:30:56,Round Robin,TaxiNYC,8000,1.85,30.00,0.00,24.33,3933,1,0.0,0.0,local,ramp_up_rate=8000
+2026-03-22 11:31:26,Round Robin,TaxiNYC,12000,228.69,11600.00,0.00,23.16,4439,1,0.0,0.0,local,ramp_up_rate=12000
+Ra Stream, Ra Stream, Ra Stream, Ra Stream, Ra Stream, Ra Stream, Ra Stream, Ra Stream, Ra Stream, Ra Stream, Ra Stream, Ra Stream, Ra Stream, Ra Stream
+2026-03-22 11:37:02,RaStream,TaxiNYC,1000,0.92,2.00,0.00,813.50,33717,1,0.0,0.0,local,ramp_up_rate=1000
+2026-03-22 11:37:32,RaStream,TaxiNYC,2000,0.81,2.00,0.00,861.23,61533,1,0.0,0.0,local,ramp_up_rate=2000
+2026-03-22 11:38:02,RaStream,TaxiNYC,3000,0.83,2.00,0.00,882.73,89552,1,0.0,0.0,local,ramp_up_rate=3000
+2026-03-22 11:38:32,RaStream,TaxiNYC,5000,0.77,2.00,0.00,894.20,117542,1,0.0,0.0,local,ramp_up_rate=5000
+2026-03-22 11:39:02,RaStream,TaxiNYC,8000,0.73,2.00,0.00,901.29,145513,1,0.0,0.0,local,ramp_up_rate=8000
+2026-03-22 11:39:32,RaStream,TaxiNYC,12000,0.72,2.00,0.00,905.70,173397,1,0.0,0.0,local,ramp_up_rate=12000
+
+2026-03-26 22:12:20,RaStream,TaxiNYC,1000,1.50,7.00,0.00,1609.50,66891,1,0.0,0.0,local,ramp_up_rate=1000
+2026-03-26 22:12:50,RaStream,TaxiNYC,2000,1.19,7.00,0.00,1706.94,122150,1,0.0,0.0,local,ramp_up_rate=2000
+2026-03-26 22:13:20,RaStream,TaxiNYC,3000,1.07,7.00,0.00,1747.79,177509,1,0.0,0.0,local,ramp_up_rate=3000
+2026-03-26 22:13:50,RaStream,TaxiNYC,5000,0.97,7.00,0.00,1770.86,232980,1,0.0,0.0,local,ramp_up_rate=5000
+2026-03-26 22:14:20,RaStream,TaxiNYC,8000,0.92,7.00,0.00,1785.04,288399,1,0.0,0.0,local,ramp_up_rate=8000
+2026-03-26 22:14:50,RaStream,TaxiNYC,12000,0.88,7.00,0.00,1794.99,343857,1,0.0,0.0,local,ramp_up_rate=12000
+,,,,,,,,,,,,,
