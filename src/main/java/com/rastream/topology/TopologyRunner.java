@@ -5,52 +5,96 @@ import org.apache.storm.Config;
 import org.apache.storm.LocalCluster;
 import org.apache.storm.topology.TopologyBuilder;
 
+/**
+ * TopologyRunner — entry point for running TaxiTopology in LocalCluster.
+ *
+ * Usage:
+ *   java -jar ra-stream.jar [--mode basic|rastream|rastream-ft] [--duration-s N]
+ *
+ * Variants:
+ *   basic        — Variant 1: simple 5-stage pipeline, no optimizations, no FT.
+ *   rastream     — Variant 2 (default): RA-Stream with BackPressure + SmartBatcher.
+ *   rastream-ft  — Variant 3: RA-Stream + full fault tolerance (ack/fail/retry).
+ *
+ * Metrics are written to:
+ *   ${METRICS_PATH}/metrics.csv   (env var)
+ *   or  ~/ra-stream-metrics/local/taxi/metrics.csv  (default)
+ */
 public class TopologyRunner {
 
     public static void main(String[] args) throws Exception {
+        String mode       = "rastream";  // default variant
+        int    durationS  = 200;         // total run time in seconds
 
-        runTaxi();
+        for (int i = 0; i < args.length; i++) {
+            switch (args[i]) {
+                case "--mode":
+                    if (i + 1 < args.length) mode = args[++i];
+                    break;
+                case "--duration-s":
+                    if (i + 1 < args.length) durationS = Integer.parseInt(args[++i]);
+                    break;
+                default:
+                    break;
+            }
+        }
 
+        System.out.println("=== Starting Taxi Topology ===");
+        System.out.println("Mode     : " + mode);
+        System.out.println("Duration : " + durationS + " s");
+        System.out.println("Dataset  : NYC Taxi (built-in synthetic data or CSV_PATH)");
+        System.out.println("Rate     : " + TaxiTopology.TARGET_RATE_TPS + " t/s initial");
 
+        runTaxi(mode, durationS);
     }
 
-    public static void runTaxi() throws Exception {
-        System.out.println("=== Starting Taxi Topology ===");
-        System.out.println("Dataset: NYC Taxi 2023 Q1 (9.38M rows)");
-        System.out.println("Starting rate: "
-                + TaxiTopology.TARGET_RATE_TPS + " t/s");
-
+    public static void runTaxi(String mode, int totalDurationS) throws Exception {
         String metricsBase = System.getenv("METRICS_PATH") != null
                 ? System.getenv("METRICS_PATH")
                 : System.getProperty("user.home") + "/ra-stream-metrics/local/taxi";
 
         new java.io.File(metricsBase).mkdirs();
-        MetricsCSVWriter csv = new MetricsCSVWriter(metricsBase + "/metrics.csv");
-
+        String metricsFile = metricsBase + "/metrics.csv";
+        MetricsCSVWriter csv = new MetricsCSVWriter(metricsFile);
         csv.open();
 
-        TopologyBuilder builder = TaxiTopology.buildTopology();
+        // Select topology variant
+        TopologyBuilder builder;
+        String schedulerLabel;
+        switch (mode) {
+            case "basic":
+                builder        = TaxiTopology.buildBasicTopology();
+                schedulerLabel = "Basic";
+                break;
+            case "rastream-ft":
+                builder        = TaxiTopology.buildFaultTolerantTopology();
+                schedulerLabel = "RaStreamFT";
+                break;
+            default: // "rastream"
+                builder        = TaxiTopology.buildTopology();
+                schedulerLabel = "RaStream";
+                break;
+        }
+
         Config conf = new Config();
         conf.setDebug(false);
         conf.setNumWorkers(2);
 
         LocalCluster cluster = new LocalCluster();
-        cluster.submitTopology("taxi-rastream",
-                conf, builder.createTopology());
+        cluster.submitTopology("taxi-" + mode, conf, builder.createTopology());
 
         System.out.println("Topology submitted. Warming up 10s...\n");
         Thread.sleep(10_000);
 
-        // Ramp up rate every 30 seconds
-        // This will find your system's saturation point
-        int[] rates = {1000, 2000, 3000, 5000, 8000, 12000};
+        // Ramp up the emit rate in steps and record metrics at each step
+        int[] rates    = {1000, 2000, 3000, 5000, 8000};
+        int   stepS    = Math.max(15, (totalDurationS - 10) / rates.length);
 
         for (int rate : rates) {
             TaxiTopology.TARGET_RATE_TPS = rate;
-            System.out.println("\n>>> Changing rate to "
-                    + rate + " t/s — running 30s...");
+            System.out.printf("%n>>> Rate → %d t/s  (running %d s)...%n", rate, stepS);
 
-            Thread.sleep(30_000);
+            Thread.sleep((long) stepS * 1_000);
 
             // Print snapshot
             TaxiTopology.LATENCY_TRACKER.printReport();
@@ -58,7 +102,7 @@ public class TopologyRunner {
 
             // Write to CSV
             csv.writeRow(
-                    "RaStream",
+                    schedulerLabel,
                     "TaxiNYC",
                     rate,
                     TaxiTopology.LATENCY_TRACKER.getAverageLatencyMs(),
@@ -70,16 +114,20 @@ public class TopologyRunner {
                     0.0,
                     0.0,
                     "local",
-                    "ramp_up_rate=" + rate
+                    "mode=" + mode + " ramp_rate=" + rate
             );
         }
 
         csv.close();
-        cluster.killTopology("taxi-rastream");
+        cluster.killTopology("taxi-" + mode);
         cluster.close();
 
-        System.out.println("\n=== Done. Check metrics at ===");
-        System.out.println(System.getProperty("user.home")
-                + "/ra-stream-metrics/local/taxi/metrics.csv");
+        System.out.println("\n=== Done. Metrics written to ===");
+        System.out.println(metricsFile);
+    }
+
+    // Backward-compatible helper (called by tests / old scripts)
+    public static void runTaxi() throws Exception {
+        runTaxi("rastream", 200);
     }
 }
