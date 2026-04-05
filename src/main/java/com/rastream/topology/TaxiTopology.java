@@ -148,6 +148,8 @@ public class TaxiTopology {
 
         private static final int  MAX_RETRIES    = 3;
         private static final long BASE_BACKOFF_MS = 100;
+        /** Cap on backoff delay to avoid extremely long retry waits. */
+        private static final long MAX_BACKOFF_MS  = 2_000;
 
         public TaxiSpout() {
             this(false); // default: unreliable (fire-and-forget)
@@ -231,7 +233,7 @@ public class TaxiTopology {
 
             // --- BackPressure check (with real TPS, not stale 0) ---
             if (BACKPRESSURE_OPTIMIZER.shouldThrottle(downstreamQueueDepth, lastComputedTps)) {
-                try { Thread.sleep(1); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                try { Thread.sleep(1); } catch (InterruptedException ie) { Thread.currentThread().interrupt(); }
                 return;
             }
 
@@ -304,7 +306,7 @@ public class TaxiTopology {
                 System.out.printf("[TaxiSpout] Dead-letter msgId=%d after %d retries%n", id, retries);
             } else {
                 retryCounts.put(id, retries + 1);
-                long backoffMs = BASE_BACKOFF_MS * (1L << retries); // exponential backoff
+                long backoffMs = Math.min(BASE_BACKOFF_MS * (1L << retries), MAX_BACKOFF_MS);
                 retryQueue.add(new long[]{id, System.currentTimeMillis() + backoffMs});
             }
         }

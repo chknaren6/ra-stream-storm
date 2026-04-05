@@ -14,10 +14,16 @@ REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
 DURATION_S="${DURATION_S:-120}"
-for arg in "$@"; do
+i=1
+while [ "$i" -le "$#" ]; do
+  arg="${!i}"
   case "$arg" in
-    --duration-s) shift; DURATION_S="$1" ;;
+    --duration-s)
+      i=$((i + 1))
+      DURATION_S="${!i}"
+      ;;
   esac
+  i=$((i + 1))
 done
 
 export METRICS_PATH="${METRICS_PATH:-$HOME/ra-stream-metrics/local/taxi}"
