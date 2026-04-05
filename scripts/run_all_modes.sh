@@ -1,32 +1,50 @@
 #!/usr/bin/env bash
+# run_all_modes.sh — Build and run all three TaxiTopology variants sequentially,
+# then produce a comparison table.
+#
+# Usage:
+#   bash scripts/run_all_modes.sh [--duration-s N]
+#
+# Output:
+#   ~/ra-stream-metrics/local/taxi/metrics.csv
+
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-export METRICS_PATH="${METRICS_PATH:-$HOME/ra-stream-metrics/local}"
+DURATION_S="${DURATION_S:-120}"
+for arg in "$@"; do
+  case "$arg" in
+    --duration-s) shift; DURATION_S="$1" ;;
+  esac
+done
+
+export METRICS_PATH="${METRICS_PATH:-$HOME/ra-stream-metrics/local/taxi}"
 mkdir -p "$METRICS_PATH"
 
-export RA_RUN_ID="run_$(date +%Y%m%d_%H%M%S)"
-export RA_PROFILE="${RA_PROFILE:-paper_fluctuating}"
-export RA_WARMUP_SEC="${RA_WARMUP_SEC:-30}"
-export RA_STAGE_SEC="${RA_STAGE_SEC:-60}"
+JAR="$REPO_ROOT/target/ra-stream-1.0-SNAPSHOT.jar"
+if [ ! -f "$JAR" ]; then
+  echo "Building..."
+  mvn -q package -DskipTests
+fi
 
 run_mode() {
   local mode="$1"
-  echo "Running mode=$mode"
-  mvn -q exec:java \
-    -Dexec.mainClass="com.rastream.topology.TopologyRunner" \
-    -Dexec.classpathScope=runtime \
-    -DRA_SCHEDULER_MODE="$mode" \
-    -DRA_RUN_ID="$RA_RUN_ID" \
-    -DRA_PROFILE="$RA_PROFILE" \
-    -DRA_WARMUP_SEC="$RA_WARMUP_SEC" \
-    -DRA_STAGE_SEC="$RA_STAGE_SEC"
+  echo ""
+  echo "============================================================"
+  echo "  Running variant: $mode  (duration=${DURATION_S}s)"
+  echo "============================================================"
+  java -jar "$JAR" --mode "$mode" --duration-s "$DURATION_S"
 }
 
-run_mode "RASTREAM"
-run_mode "BASELINE_ROUND_ROBIN"
-run_mode "BASELINE_ANTI_LOCALITY_WORST_FIT"
+run_mode "basic"
+run_mode "rastream"
+run_mode "rastream-ft"
 
-echo "Mode runs complete. Check: $METRICS_PATH/master.csv"
+echo ""
+echo "============================================================"
+echo "  All variants complete. Metrics: $METRICS_PATH/metrics.csv"
+echo "  Generating comparison table..."
+echo "============================================================"
+python3 "$REPO_ROOT/scripts/compare_metrics.py" "$METRICS_PATH/metrics.csv"

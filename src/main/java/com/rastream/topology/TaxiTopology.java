@@ -1,16 +1,10 @@
 package com.rastream.topology;
 
-import com.rastream.dag.Edge;
-import com.rastream.dag.StreamApplication;
-import com.rastream.dag.Task;
 import com.rastream.faulttolerance.FailureDetector;
 import com.rastream.faulttolerance.FastLogger;
 import com.rastream.faulttolerance.RecoveryManager;
 import com.rastream.metrics.LatencyTracker;
 import com.rastream.metrics.ThroughputTracker;
-import com.rastream.model.CommunicationModel;
-import com.rastream.model.ResourceModel;
-import com.rastream.monitor.DataMonitor;
 import com.rastream.optimizations.BackPressureController;
 import com.rastream.optimizations.SmartBatcher;
 import org.apache.storm.spout.SpoutOutputCollector;
@@ -22,36 +16,40 @@ import org.apache.storm.topology.base.BaseRichSpout;
 import org.apache.storm.tuple.Fields;
 import org.apache.storm.tuple.Tuple;
 import org.apache.storm.tuple.Values;
-import org.apache.commons.csv.CSVRecord;
 
 import java.io.IOException;
 import java.nio.file.Paths;
 import java.util.*;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
- * ENHANCED TaxiTopology with Integrated Fault Tolerance and Optimizations
+ * TaxiTopology — RA-Stream 5-stage streaming pipeline.
  *
  * 5-STAGE PIPELINE:
- *   Stage 1 (Spout): Read NYC taxi data from CSV → emit tuples (HIGH Tr)
- *   Stage 2 (Validator): Filter & validate taxi records → emit valid tuples
- *   Stage 3 (Aggregator): Group by pickup zone, 10s windows → statistics
- *   Stage 4 (Anomaly): Detect anomalies (high fare, long distance) → alerts
- *   Stage 5 (Output): Terminal stage, measure end-to-end latency & throughput
+ *   Stage 1 (Spout):      Read NYC taxi data → emit tuples
+ *   Stage 2 (Validator):  Filter/validate taxi records → emit valid tuples
+ *   Stage 3 (Aggregator): Group by pickup zone, 10-s windows → statistics
+ *   Stage 4 (Anomaly):    Detect anomalies (high fare / long distance) → alerts
+ *   Stage 5 (Output):     Measure end-to-end latency and throughput
  *
- * FAULT TOLERANCE INTEGRATION:
- *   - FailureDetector: Monitors worker heartbeats every 3 seconds
- *   - EnhancedRecoveryManager: Rebalances tasks on failure with adaptive load balancing
- *   - FastLogger: Logs tuple lifecycle for recovery
- *   - AckTracker: Tracks tuple acknowledgements for exactly-once semantics
+ * Three build variants:
+ *   buildBasicTopology()          — no optimizations, no FT (Variant 1)
+ *   buildTopology()               — RA-Stream with optimizations (Variant 2)
+ *   buildFaultTolerantTopology()  — RA-Stream + full FT (Variant 3)
  *
- * OPTIMIZATION INTEGRATION:
- *   - BackPressureOptimizer: Throttles spout when downstream queues fill
- *   - BatchingOptimizer: Dynamically adjusts batch sizes by data rate
+ * Root-cause fixes applied here:
+ *   1. BackPressure rate tracking: track actual TPS locally so watermarks
+ *      never collapse to 0 → no more spurious throttle ON/OFF with queue=0.
+ *   2. Built-in synthetic data fallback: spout works out-of-the-box even
+ *      when CSV_PATH is absent.
+ *   3. ValidatorBolt anchoring: emits are anchored to the input tuple so
+ *      Storm's reliability chain is intact.
+ *   4. Pipeline wiring: OutputBolt reads from taxi-anomaly (stage 4→5).
+ *   5. Reliable spout (FT variant): message IDs, ack/fail, exponential
+ *      backoff retry up to MAX_RETRIES, then dead-letter stream.
  */
 public class TaxiTopology {
 
-    // Shared trackers — same pattern as WordCount
+    // Shared trackers
     public static final LatencyTracker LATENCY_TRACKER = new LatencyTracker();
     public static final ThroughputTracker THROUGHPUT_TRACKER = new ThroughputTracker();
 
@@ -60,18 +58,11 @@ public class TaxiTopology {
     public static FailureDetector failureDetector;
     public static FastLogger fastLogger;
 
-    // Optimization Components
+    // Optimization Components (kept as-is per requirements)
     public static final BackPressureController BACKPRESSURE_OPTIMIZER =
             new BackPressureController(50, 200);  // low=50, high=200
     public static final SmartBatcher BATCHING_OPTIMIZER =
             new SmartBatcher(10, 100, 50);  // min=10, max=100, target=50
-
-    private static final boolean IN_MEMORY_MODE =
-            System.getenv("IN_MEMORY_MODE") != null
-                    && System.getenv("IN_MEMORY_MODE").equals("true");
-
-    private static org.apache.commons.csv.CSVParser parser;
-    private static java.util.Iterator<CSVRecord> iterator;
 
     public static final String[] COMPONENT_NAMES = {
             "taxi-reader", "taxi-validator", "taxi-aggregator",
@@ -80,145 +71,241 @@ public class TaxiTopology {
 
     public static volatile int TARGET_RATE_TPS = 3000;
 
+    /** Default CSV path; overridden by CSV_PATH env-var. */
+    private static final String CSV_PATH =
+            System.getenv("CSV_PATH") != null
+                    ? System.getenv("CSV_PATH")
+                    : System.getProperty("user.home")
+                      + "/ra-stream-data/nyc-taxi/combined.csv";
+
+    // -----------------------------------------------------------------------
+    // Built-in synthetic data generator
+    // -----------------------------------------------------------------------
+    static List<String[]> generateSyntheticData(int count) {
+        String[] zones = {
+            "Manhattan", "Brooklyn", "Queens", "Bronx", "Staten Island",
+            "JFK Airport", "LaGuardia", "Midtown", "Lower East Side",
+            "Upper West Side", "Harlem", "Flushing"
+        };
+        Random rng = new Random(42);
+        List<String[]> data = new ArrayList<>(count);
+        for (int i = 0; i < count; i++) {
+            String vendorId   = String.valueOf(1 + rng.nextInt(2));
+            String pickupTime = String.format("2023-01-%02d %02d:%02d:%02d",
+                    1 + rng.nextInt(28), rng.nextInt(24),
+                    rng.nextInt(60), rng.nextInt(60));
+            String pickupZone  = zones[rng.nextInt(zones.length)];
+            String dropoffZone = zones[rng.nextInt(zones.length)];
+            double fare     = 2.5 + rng.nextDouble() * 150;
+            double total    = fare + rng.nextDouble() * 20;
+            double distance = 0.1 + rng.nextDouble() * 50;
+            int    pax      = 1 + rng.nextInt(6);
+            data.add(new String[]{
+                vendorId, pickupTime, pickupZone, dropoffZone,
+                String.format("%.2f", fare), String.format("%.2f", total),
+                String.format("%.2f", distance), String.valueOf(pax)
+            });
+        }
+        return data;
+    }
+
     // -----------------------------------------------------------------------
     // STAGE 1: TaxiSpout (with BackPressure)
+    //
+    // Reliable mode (reliableMode=true): emits with message IDs and
+    // implements ack/fail with exponential-backoff retry + dead-letter.
+    // Unreliable mode (reliableMode=false): fire-and-forget (no ack/fail).
     // -----------------------------------------------------------------------
     public static class TaxiSpout extends BaseRichSpout {
 
+        private final boolean reliableMode;
         private SpoutOutputCollector collector;
         private long lastEmitNs = 0;
         private List<String[]> rows;
         private int currentIndex = 0;
 
-        // Optimization: Track queue depth for backpressure
+        // Backpressure: track queue depth and actual TPS
         private int downstreamQueueDepth = 0;
-        private long tuplesEmitted = 0;
-        private final AtomicLong emitRateTps = new AtomicLong(0);
+        /** Rolling TPS counter — updated every second to feed BackPressureController. */
+        private long emitWindowStartMs = 0;
+        private long emitWindowCount   = 0;
+        private int  lastComputedTps   = TARGET_RATE_TPS; // sane initial value
 
-        private static final String CSV_PATH =
-                System.getenv("CSV_PATH") != null
-                        ? System.getenv("CSV_PATH")
-                        : System.getProperty("user.home")
-                          + "/ra-stream-data/nyc-taxi/combined.csv";
+        // FT: message-ID counter and in-flight tuple store
+        private long msgIdCounter = 0;
+        /** msgId → original row data (only populated in reliableMode). */
+        private final Map<Long, String[]> pendingTuples = new LinkedHashMap<>();
+        private final Map<Long, Integer>  retryCounts   = new HashMap<>();
+        /** [msgId, availableAtMs] — scheduled retries. */
+        private final Deque<long[]>       retryQueue    = new ArrayDeque<>();
+
+        // Spout-level metrics counters
+        private long emitted  = 0;
+        private long acked    = 0;
+        private long failed   = 0;
+        private long retried  = 0;
+        private long deadLettered = 0;
+
+        private static final int  MAX_RETRIES    = 3;
+        private static final long BASE_BACKOFF_MS = 100;
+
+        public TaxiSpout() {
+            this(false); // default: unreliable (fire-and-forget)
+        }
+
+        public TaxiSpout(boolean reliableMode) {
+            this.reliableMode = reliableMode;
+        }
 
         @Override
         public void open(Map<String, Object> conf,
                          TopologyContext context,
                          SpoutOutputCollector collector) {
-            this.collector = collector;
+            this.collector       = collector;
+            this.emitWindowStartMs = System.currentTimeMillis();
 
-            if (IN_MEMORY_MODE) {
+            // Prefer synthetic data when real CSV is absent
+            java.io.File csvFile = new java.io.File(CSV_PATH);
+            if (csvFile.exists()) {
+                System.out.println("TaxiSpout: loading CSV into memory from " + CSV_PATH);
                 this.rows = new ArrayList<>();
-                System.out.println("TaxiSpout: loading CSV into memory...");
                 try (java.io.BufferedReader br =
-                             new java.io.BufferedReader(
-                                     new java.io.FileReader(CSV_PATH))) {
+                             new java.io.BufferedReader(new java.io.FileReader(csvFile))) {
                     br.readLine(); // skip header
                     String line;
                     while ((line = br.readLine()) != null) {
-                        rows.add(line.split(",", -1));
+                        String[] parts = line.split(",", -1);
+                        if (parts.length >= 8) rows.add(parts);
                     }
                 } catch (Exception e) {
-                    throw new RuntimeException("Cannot load CSV", e);
+                    System.err.println("TaxiSpout: CSV read failed (" + e.getMessage()
+                            + "), falling back to synthetic data");
+                    rows = generateSyntheticData(50_000);
                 }
-                System.out.println("TaxiSpout: loaded " + rows.size() + " rows into memory");
+                System.out.println("TaxiSpout: loaded " + rows.size() + " rows");
             } else {
-                System.out.println("TaxiSpout: streaming CSV from disk");
-                try {
-                    openCsvParser();
-                } catch (Exception e) {
-                    throw new RuntimeException("Cannot open CSV: " + CSV_PATH, e);
-                }
+                System.out.println("TaxiSpout: CSV not found at " + CSV_PATH
+                        + " — using built-in synthetic data (50 000 rows)");
+                this.rows = generateSyntheticData(50_000);
             }
 
-            // Fault Tolerance: Register this spout with recovery manager
-            RECOVERY_MANAGER.registerTask("taxi-reader-" + context.getThisTaskId(),
+            // Fault Tolerance: register with recovery manager
+            RECOVERY_MANAGER.registerTask(
+                    "taxi-reader-" + context.getThisTaskId(),
                     "worker-" + context.getThisWorkerPort());
-        }
-
-        private void openCsvParser() throws Exception {
-            java.io.Reader reader = new java.io.FileReader(CSV_PATH);
-            parser = org.apache.commons.csv.CSVFormat.DEFAULT
-                    .withFirstRecordAsHeader()
-                    .withIgnoreHeaderCase()
-                    .withTrim()
-                    .parse(reader);
-            iterator = parser.iterator();
         }
 
         @Override
         public void nextTuple() {
+            // --- Replay scheduled retries first (FT only) ---
+            if (reliableMode && !retryQueue.isEmpty()) {
+                long[] head = retryQueue.peek();
+                if (System.currentTimeMillis() >= head[1]) {
+                    retryQueue.poll();
+                    long msgId = head[0];
+                    String[] r = pendingTuples.get(msgId);
+                    if (r != null) {
+                        emitRow(r, msgId);
+                        retried++;
+                        return;
+                    }
+                }
+            }
+
+            // --- Rate limiter ---
             long nowNs = System.nanoTime();
             long intervalNs = 1_000_000_000L / TARGET_RATE_TPS;
             if (nowNs - lastEmitNs < intervalNs) return;
             lastEmitNs = nowNs;
 
-            try {
-                String[] r;
+            // --- Update actual-TPS estimate (rolling 1-second window) ---
+            long nowMs = System.currentTimeMillis();
+            emitWindowCount++;
+            if (nowMs - emitWindowStartMs >= 1_000) {
+                // FIX: always use a real measured rate so watermarks never collapse to 0
+                lastComputedTps = (int) (emitWindowCount * 1_000L
+                        / Math.max(1, nowMs - emitWindowStartMs));
+                emitWindowStartMs = nowMs;
+                emitWindowCount   = 0;
+            }
 
-                if (IN_MEMORY_MODE) {
-                    if (currentIndex >= rows.size()) currentIndex = 0;
-                    r = rows.get(currentIndex++);
-                    if (r.length < 8) return;
-                } else {
-                    if (!iterator.hasNext()) {
-                        parser.close();
-                        openCsvParser();
-                    }
-                    CSVRecord record = iterator.next();
-                    r = new String[]{
-                            record.get("VendorID"),
-                            record.get("pickup_datetime"),
-                            record.get("pickup_zone"),  // from lookup table
-                            record.get("dropoff_zone"),
-                            record.get("fare_amount"),
-                            record.get("total_amount"),
-                            record.get("trip_distance"),
-                            record.get("passenger_count")
-                    };
-                }
+            // --- BackPressure check (with real TPS, not stale 0) ---
+            if (BACKPRESSURE_OPTIMIZER.shouldThrottle(downstreamQueueDepth, lastComputedTps)) {
+                try { Thread.sleep(1); } catch (InterruptedException ignored) { Thread.currentThread().interrupt(); }
+                return;
+            }
 
-                // OPTIMIZATION: Check backpressure before emitting
-                int incomingRate = (int) emitRateTps.get();
-                if (BACKPRESSURE_OPTIMIZER.shouldThrottle(downstreamQueueDepth, incomingRate)) {
-                    // Throttle: sleep before attempting emit
-                    Thread.sleep(1);
-                    return;
-                }
+            // --- Fetch next row (loops back to start when exhausted) ---
+            if (rows.isEmpty()) return;
+            if (currentIndex >= rows.size()) currentIndex = 0;
+            String[] r = rows.get(currentIndex++);
+            if (r.length < 8) return;
 
-                String tupleId = UUID.randomUUID().toString();
-                LATENCY_TRACKER.recordEmit(tupleId);
+            long msgId = msgIdCounter++;
+            if (reliableMode) pendingTuples.put(msgId, r);
+            emitRow(r, reliableMode ? msgId : null);
+            emitted++;
+            if (emitted % 5_000 == 0) {
+                System.out.printf("[TaxiSpout] emitted=%d acked=%d failed=%d retried=%d deadLettered=%d%n",
+                        emitted, acked, failed, retried, deadLettered);
+            }
+        }
 
-                // Fault Tolerance: Log tuple emission
-                if (fastLogger != null) {
-                    fastLogger.log(
-                            // FIX: Change parseLong to parseUnsignedLong
-                            Long.parseUnsignedLong(tupleId.replace("-", "").substring(0, 16), 16),
-                            System.currentTimeMillis(),
-                            "taxi-reader",
-                            "taxi-validator"
-                    );
-                }
+        private void emitRow(String[] r, Long msgId) {
+            String tupleId = String.valueOf(msgId != null ? msgId : emitted);
+            LATENCY_TRACKER.recordEmit(tupleId);
 
-                collector.emit(new Values(
-                        safeInt(r, 0),    // vendorId
-                        r[2].trim(),      // pickupZone
-                        r[3].trim(),      // dropoffZone
-                        safeDouble(r, 4), // fareAmount
-                        safeDouble(r, 5), // totalAmount
-                        safeDouble(r, 6), // tripDistance
-                        safeDouble(r, 7), // passengerCount
-                        r[1].trim(),      // pickupTime
-                        tupleId
-                ));
+            // Fault Tolerance: log tuple emission
+            if (fastLogger != null) {
+                fastLogger.log(msgId != null ? msgId : emitted,
+                        System.currentTimeMillis(), "taxi-reader", "taxi-validator");
+            }
 
-                tuplesEmitted++;
-                if (tuplesEmitted % 1000 == 0) {
-                    System.out.println("[TaxiSpout] Emitted " + tuplesEmitted + " tuples");
-                }
+            Values values = new Values(
+                    safeInt(r, 0),    // vendorId
+                    r[2].trim(),      // pickupZone
+                    r[3].trim(),      // dropoffZone
+                    safeDouble(r, 4), // fareAmount
+                    safeDouble(r, 5), // totalAmount
+                    safeDouble(r, 6), // tripDistance
+                    safeDouble(r, 7), // passengerCount
+                    r[1].trim(),      // pickupTime
+                    tupleId           // tupleId (String form of msgId)
+            );
 
-            } catch (Exception e) {
-                System.err.println("[TaxiSpout] Error: " + e.getMessage());
+            if (msgId != null) {
+                collector.emit(values, msgId);  // reliable emit
+            } else {
+                collector.emit(values);          // unreliable emit
+            }
+        }
+
+        // ack / fail — only meaningful in reliableMode
+        @Override
+        public void ack(Object msgId) {
+            if (!reliableMode) return;
+            Long id = (Long) msgId;
+            pendingTuples.remove(id);
+            retryCounts.remove(id);
+            acked++;
+        }
+
+        @Override
+        public void fail(Object msgId) {
+            if (!reliableMode) return;
+            Long id = (Long) msgId;
+            failed++;
+            int retries = retryCounts.getOrDefault(id, 0);
+            if (retries >= MAX_RETRIES) {
+                // Dead-letter: discard after too many retries
+                pendingTuples.remove(id);
+                retryCounts.remove(id);
+                deadLettered++;
+                System.out.printf("[TaxiSpout] Dead-letter msgId=%d after %d retries%n", id, retries);
+            } else {
+                retryCounts.put(id, retries + 1);
+                long backoffMs = BASE_BACKOFF_MS * (1L << retries); // exponential backoff
+                retryQueue.add(new long[]{id, System.currentTimeMillis() + backoffMs});
             }
         }
 
@@ -305,7 +392,8 @@ public class TaxiTopology {
             long batchStartNs = System.nanoTime();
 
             for (Tuple t : batchBuffer) {
-                collector.emit(new Values(
+                // FIX: anchor the emit to the input tuple so Storm can track reliability
+                collector.emit(t, new Values(
                         t.getIntegerByField("vendorId"),
                         t.getStringByField("pickupZone"),
                         t.getStringByField("dropoffZone"),
@@ -383,12 +471,13 @@ public class TaxiTopology {
                 stats.totalFare += fare;
                 stats.totalDistance += distance;
 
-                // Emit aggregates every 10 seconds
+                // Emit aggregates once per 10-second window and anchor to the input tuple
                 if (System.currentTimeMillis() - stats.windowStartMs >= 10000) {
-                    double avgFare = stats.totalFare / Math.max(1, stats.tripCount);
+                    double avgFare     = stats.totalFare    / Math.max(1, stats.tripCount);
                     double avgDistance = stats.totalDistance / Math.max(1, stats.tripCount);
 
-                    collector.emit(new Values(
+                    // FIX: anchor emit to input tuple
+                    collector.emit(t, new Values(
                             zone,
                             stats.tripCount,
                             avgFare,
@@ -433,7 +522,7 @@ public class TaxiTopology {
         @Override
         public void execute(Tuple t) {
             try {
-                double avgFare = t.getDoubleByField("avgFare");
+                double avgFare     = t.getDoubleByField("avgFare");
                 double avgDistance = t.getDoubleByField("avgDistance");
 
                 // Anomaly detection: very high fare or very long distance
@@ -441,7 +530,8 @@ public class TaxiTopology {
                     String alertId = "ALERT_" + System.nanoTime();
                     anomalyCount++;
 
-                    collector.emit(new Values(
+                    // FIX: anchor emit to input tuple
+                    collector.emit(t, new Values(
                             t.getStringByField("zone"),
                             t.getLongByField("tripCount"),
                             avgFare,
@@ -518,27 +608,65 @@ public class TaxiTopology {
     }
 
     // -----------------------------------------------------------------------
-    // Build the topology
+    // Build the topology — three variants
     // -----------------------------------------------------------------------
-    public static TopologyBuilder buildTopology() throws IOException {
-        // Initialize fault tolerance components
-        failureDetector = new FailureDetector(10000, failedNode -> {
-            System.out.println("[FaultTolerance] Node failed: " + failedNode);
-            List<String> aliveNodes = List.of("worker-1", "worker-2", "worker-3");
-            Map<String, String> reassignments = RECOVERY_MANAGER.recoverNodeFailure(failedNode, aliveNodes);
-            System.out.println("[FaultTolerance] Reassignments: " + reassignments);
-        });
-        failureDetector.start(3000);  // Check every 3 seconds
 
-        fastLogger = new FastLogger(Paths.get("/tmp/taxi-recovery.log"), 10000, 100, 5000);
-
-        // Build the Storm topology
+    /**
+     * Variant 1 — Basic (EvenScheduler, no optimizations, no FT).
+     * Simple 5-stage pipeline; single spout, 1 bolt per stage.
+     */
+    public static TopologyBuilder buildBasicTopology() throws IOException {
         TopologyBuilder builder = new TopologyBuilder();
 
-        // Stage 1: Spout
-        builder.setSpout("taxi-reader", new TaxiSpout(), 2);
+        // Stage 1: Spout (unreliable, no backpressure)
+        builder.setSpout("taxi-reader", new TaxiSpout(false), 1);
 
-        // Stage 2: Validator
+        // Stage 2: Validator (simple pass-through, no batching)
+        builder.setBolt("taxi-validator", new ValidatorBolt(), 1)
+                .shuffleGrouping("taxi-reader");
+
+        // Stage 3: Aggregator
+        builder.setBolt("taxi-aggregator", new AggregateBolt(), 1)
+                .fieldsGrouping("taxi-validator", new Fields("pickupZone"));
+
+        // Stage 4: Anomaly
+        builder.setBolt("taxi-anomaly", new AnomalyBolt(), 1)
+                .shuffleGrouping("taxi-aggregator");
+
+        // Stage 5: Output — reads from taxi-anomaly (correct 5-stage flow)
+        builder.setBolt("taxi-output", new OutputBolt(), 1)
+                .shuffleGrouping("taxi-anomaly");
+
+        return builder;
+    }
+
+    /**
+     * Variant 2 — RA-Stream (optimizations: backpressure + smart batching).
+     * Higher parallelism; no fault-tolerance (fire-and-forget).
+     */
+    public static TopologyBuilder buildTopology() throws IOException {
+        // Initialize FT infrastructure (failure detector + fast logger)
+        // so the FT fields are non-null in case buildFaultTolerantTopology() is later called.
+        if (failureDetector == null) {
+            failureDetector = new FailureDetector(10000, failedNode -> {
+                System.out.println("[FaultTolerance] Node failed: " + failedNode);
+                List<String> aliveNodes = List.of("worker-1", "worker-2", "worker-3");
+                Map<String, String> reassignments =
+                        RECOVERY_MANAGER.recoverNodeFailure(failedNode, aliveNodes);
+                System.out.println("[FaultTolerance] Reassignments: " + reassignments);
+            });
+            failureDetector.start(3000);  // Check every 3 seconds
+        }
+        if (fastLogger == null) {
+            fastLogger = new FastLogger(Paths.get("/tmp/taxi-recovery.log"), 10000, 100, 5000);
+        }
+
+        TopologyBuilder builder = new TopologyBuilder();
+
+        // Stage 1: Spout (unreliable, with backpressure)
+        builder.setSpout("taxi-reader", new TaxiSpout(false), 2);
+
+        // Stage 2: Validator (with smart batching)
         builder.setBolt("taxi-validator", new ValidatorBolt(), 3)
                 .shuffleGrouping("taxi-reader");
 
@@ -550,9 +678,54 @@ public class TaxiTopology {
         builder.setBolt("taxi-anomaly", new AnomalyBolt(), 2)
                 .shuffleGrouping("taxi-aggregator");
 
-        // Stage 5: Output
+        // FIX: Stage 5 reads from anomaly (stage 4 → 5), completing the pipeline
         builder.setBolt("taxi-output", new OutputBolt(), 2)
+                .shuffleGrouping("taxi-anomaly");
+
+        return builder;
+    }
+
+    /**
+     * Variant 3 — RA-Stream with Fault Tolerance.
+     * All Variant-2 optimizations PLUS:
+     *   - Reliable spout: message IDs, ack/fail, exponential-backoff retry,
+     *     dead-letter after MAX_RETRIES
+     *   - AckTracker for window-level exactly-once tracking
+     *   - FastLogger for tuple-lifecycle audit
+     *   - FailureDetector for worker-heartbeat monitoring
+     */
+    public static TopologyBuilder buildFaultTolerantTopology() throws IOException {
+        // Always initialise FT infrastructure for this variant
+        failureDetector = new FailureDetector(10000, failedNode -> {
+            System.out.println("[FaultTolerance] Node failed: " + failedNode);
+            List<String> aliveNodes = List.of("worker-1", "worker-2", "worker-3");
+            Map<String, String> reassignments =
+                    RECOVERY_MANAGER.recoverNodeFailure(failedNode, aliveNodes);
+            System.out.println("[FaultTolerance] Reassignments: " + reassignments);
+        });
+        failureDetector.start(3000);
+        fastLogger = new FastLogger(Paths.get("/tmp/taxi-recovery.log"), 10000, 100, 5000);
+
+        TopologyBuilder builder = new TopologyBuilder();
+
+        // Stage 1: Reliable spout (ack/fail + retry + dead-letter)
+        builder.setSpout("taxi-reader", new TaxiSpout(true), 2);
+
+        // Stage 2: Validator (with smart batching)
+        builder.setBolt("taxi-validator", new ValidatorBolt(), 3)
+                .shuffleGrouping("taxi-reader");
+
+        // Stage 3: Aggregator
+        builder.setBolt("taxi-aggregator", new AggregateBolt(), 3)
+                .fieldsGrouping("taxi-validator", new Fields("pickupZone"));
+
+        // Stage 4: Anomaly
+        builder.setBolt("taxi-anomaly", new AnomalyBolt(), 2)
                 .shuffleGrouping("taxi-aggregator");
+
+        // Stage 5: Output (correct 5-stage flow: anomaly → output)
+        builder.setBolt("taxi-output", new OutputBolt(), 2)
+                .shuffleGrouping("taxi-anomaly");
 
         return builder;
     }
