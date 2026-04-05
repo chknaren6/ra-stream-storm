@@ -4,6 +4,7 @@ target/
 
 # Data files — never commit these, too large
 data/
+*.csv
 *.parquet
 *.zip
 *.gz

@@ -15,47 +15,48 @@
     </properties>
 
     <dependencies>
-        <!-- PROVIDED — already on Storm cluster, exclude from fat JAR -->
+        <!-- PROVIDED — on Storm cluster -->
         <dependency>
             <groupId>org.apache.storm</groupId>
             <artifactId>storm-client</artifactId>
             <version>2.6.1</version>
-            <scope>provided</scope>
         </dependency>
-
         <dependency>
             <groupId>org.apache.storm</groupId>
             <artifactId>storm-server</artifactId>
             <version>2.6.1</version>
-            <scope>provided</scope>
         </dependency>
 
-        <!-- BUNDLED — not on Storm cluster, include in fat JAR -->
+        <!-- BUNDLED -->
         <dependency>
             <groupId>com.google.code.gson</groupId>
             <artifactId>gson</artifactId>
             <version>2.10.1</version>
         </dependency>
-
         <dependency>
             <groupId>org.apache.commons</groupId>
             <artifactId>commons-csv</artifactId>
             <version>1.10.0</version>
         </dependency>
-
         <dependency>
             <groupId>org.apache.kafka</groupId>
             <artifactId>kafka-clients</artifactId>
             <version>3.0.0</version>
         </dependency>
 
+        <!-- TEST ONLY -->
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
             <version>5.10.2</version>
             <scope>test</scope>
         </dependency>
-
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter-api</artifactId>
+            <version>5.10.2</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>junit</groupId>
             <artifactId>junit</artifactId>
@@ -65,14 +66,8 @@
         <dependency>
             <groupId>org.testng</groupId>
             <artifactId>testng</artifactId>
-            <version>RELEASE</version>
-            <scope>compile</scope>
-        </dependency>
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter-api</artifactId>
-            <version>5.10.2</version>
-            <scope>compile</scope>
+            <version>7.10.2</version>
+            <scope>test</scope>
         </dependency>
     </dependencies>
 
