@@ -1,156 +1,158 @@
-import os, glob, math
-import numpy as np
 import pandas as pd
-import seaborn as sns
 import matplotlib.pyplot as plt
-from scipy import stats
+import seaborn as sns
+from pathlib import Path
+import warnings
+warnings.filterwarnings("ignore")
 
-sns.set_theme(style="whitegrid")
-os.makedirs("results/plots", exist_ok=True)
-os.makedirs("results/analysis", exist_ok=True)
+# ================== SETTINGS ==================
+sns.set_style("whitegrid")
+plt.rcParams['figure.figsize'] = (12, 8)
+plt.rcParams['font.size'] = 14
+plt.rcParams['axes.labelsize'] = 16
+plt.rcParams['axes.titlesize'] = 18
+plt.rcParams['legend.fontsize'] = 12
 
-files = glob.glob("results/raw-data/*.csv")
-if not files:
-    print("No CSV files in results/raw-data")
-    raise SystemExit(0)
+OUTPUT_DIR = Path("../results/plots")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+CSV_PATH = "/home/karthik_hadoop/ra-stream-metrics/local/taxi/metrics.csv"
 
-# Normalize config names (strip _repN suffix)
-df["config_raw"] = df["config"].astype(str)
-df["rep"] = df["config_raw"].str.extract(r"_rep(\d+)$", expand=False).fillna("1")
-df["config"] = df["config_raw"].str.replace(r"_rep\d+$", "", regex=True)
+# Load data
+df = pd.read_csv(CSV_PATH)
 
-# Required cols
-required = ["time_sec","config","data_rate","avg_ms","p50_ms","p95_ms","p99_ms","tps","cpu"]
-for c in required:
-    if c not in df.columns:
-        print(f"Missing column: {c}")
-        raise SystemExit(1)
+# Clean column names for easier use
+df = df.rename(columns={
+    'stream_rate_tps': 'Input_Rate',
+    'avg_latency_ms': 'Avg_Latency_ms',
+    'max_latency_ms': 'Max_Latency_ms',
+    'throughput_tps': 'Throughput',
+    'avg_cpu_pct': 'CPU_Util',
+    'avg_mem_pct': 'Mem_Util'
+})
 
-# Derive extras
-df["latency_cv"] = df.groupby(["config","data_rate"])["avg_ms"].transform(lambda s: s.std(ddof=0)/(s.mean()+1e-9))
-df["throughput_per_cpu"] = df["tps"] / (df["cpu"] + 1e-6)
-df["throughput_degradation"] = df.groupby(["config"])["tps"].transform(lambda s: (s.max()-s)/(s.max()+1e-9))*100.0
+# Nice scheduler names for legend
+scheduler_map = {
+    "Round Robin": "Basic (Round Robin)",
+    "RaStream": "RA-Stream",
+    "RaStreamFT": "RA-Stream + FT"
+}
+df['Scheduler'] = df['scheduler'].map(scheduler_map)
 
-# 1 Latency vs Time
-plt.figure(figsize=(12,6))
-sns.lineplot(data=df, x="time_sec", y="avg_ms", hue="config", estimator="mean", errorbar=("ci",95))
-plt.title("Latency vs Time (mean ±95% CI)")
-plt.tight_layout(); plt.savefig("results/plots/01_latency_vs_time_ci.png"); plt.close()
+print(f"Loaded {len(df)} records")
+print("Schedulers:", df['Scheduler'].unique())
 
-# 2 Throughput vs Data Rate
-g = df.groupby(["config","data_rate"], as_index=False)["tps"].mean()
-plt.figure(figsize=(12,6))
-sns.lineplot(data=g, x="data_rate", y="tps", hue="config", marker="o")
-plt.title("Throughput vs Data Rate")
-plt.tight_layout(); plt.savefig("results/plots/02_throughput_vs_rate.png"); plt.close()
+# ================== PLOT 1: Average Latency vs Input Rate ==================
+plt.figure()
+sns.lineplot(data=df, x='Input_Rate', y='Avg_Latency_ms',
+             hue='Scheduler', style='Scheduler', markers=True, linewidth=2.5, markersize=8)
+plt.title('Average Latency vs Input Rate')
+plt.xlabel('Input Rate (tuples/sec)')
+plt.ylabel('Average Latency (ms)')
+plt.legend(title='Scheduling Approach')
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / '01_avg_latency_vs_rate.png', dpi=400, bbox_inches='tight')
+plt.close()
 
-# 3 p95 latency vs Data Rate
-g = df.groupby(["config","data_rate"], as_index=False)["p95_ms"].mean()
-plt.figure(figsize=(12,6))
-sns.lineplot(data=g, x="data_rate", y="p95_ms", hue="config", marker="o")
-plt.title("P95 Latency vs Data Rate")
-plt.tight_layout(); plt.savefig("results/plots/03_p95_latency_vs_rate.png"); plt.close()
+# ================== PLOT 2: Max Latency vs Input Rate ==================
+plt.figure()
+sns.lineplot(data=df, x='Input_Rate', y='Max_Latency_ms',
+             hue='Scheduler', style='Scheduler', markers=True, linewidth=2.5)
+plt.title('Maximum Latency vs Input Rate')
+plt.xlabel('Input Rate (tuples/sec)')
+plt.ylabel('Max Latency (ms)')
+plt.legend(title='Scheduling Approach')
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / '02_max_latency_vs_rate.png', dpi=400, bbox_inches='tight')
+plt.close()
 
-# 4 p99 latency vs Data Rate
-g = df.groupby(["config","data_rate"], as_index=False)["p99_ms"].mean()
-plt.figure(figsize=(12,6))
-sns.lineplot(data=g, x="data_rate", y="p99_ms", hue="config", marker="o")
-plt.title("P99 Latency vs Data Rate")
-plt.tight_layout(); plt.savefig("results/plots/04_p99_latency_vs_rate.png"); plt.close()
+# ================== PLOT 3: Throughput vs Input Rate ==================
+plt.figure()
+sns.lineplot(data=df, x='Input_Rate', y='Throughput',
+             hue='Scheduler', style='Scheduler', markers=True, linewidth=2.5)
+plt.title('Achieved Throughput vs Input Rate')
+plt.xlabel('Input Rate (tuples/sec)')
+plt.ylabel('Throughput (tuples/sec)')
+plt.legend(title='Scheduling Approach')
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / '03_throughput_vs_rate.png', dpi=400, bbox_inches='tight')
+plt.close()
 
-# 5 CPU vs Time
-plt.figure(figsize=(12,6))
-sns.lineplot(data=df, x="time_sec", y="cpu", hue="config", estimator="mean", errorbar=("ci",95))
-plt.title("CPU Utilization vs Time (mean ±95% CI)")
-plt.tight_layout(); plt.savefig("results/plots/05_cpu_vs_time_ci.png"); plt.close()
+# ================== PLOT 4: Throughput Efficiency ==================
+df['Efficiency'] = (df['Throughput'] / df['Input_Rate']) * 100
 
-# 6 Latency distribution
-plt.figure(figsize=(12,6))
-sns.boxplot(data=df, x="config", y="avg_ms")
-plt.xticks(rotation=20)
-plt.title("Average Latency Distribution")
-plt.tight_layout(); plt.savefig("results/plots/06_latency_boxplot.png"); plt.close()
+plt.figure()
+sns.lineplot(data=df, x='Input_Rate', y='Efficiency',
+             hue='Scheduler', style='Scheduler', markers=True, linewidth=2.5)
+plt.title('Throughput Efficiency (%)')
+plt.xlabel('Input Rate (tuples/sec)')
+plt.ylabel('Efficiency (%)')
+plt.legend(title='Scheduling Approach')
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / '04_efficiency_vs_rate.png', dpi=400, bbox_inches='tight')
+plt.close()
 
-# 7 Throughput distribution
-plt.figure(figsize=(12,6))
-sns.boxplot(data=df, x="config", y="tps")
-plt.xticks(rotation=20)
-plt.title("Throughput Distribution")
-plt.tight_layout(); plt.savefig("results/plots/07_throughput_boxplot.png"); plt.close()
+# ================== PLOT 5: CPU Utilization ==================
+plt.figure()
+sns.lineplot(data=df, x='Input_Rate', y='CPU_Util',
+             hue='Scheduler', style='Scheduler', markers=True, linewidth=2.5)
+plt.title('CPU Utilization vs Input Rate')
+plt.xlabel('Input Rate (tuples/sec)')
+plt.ylabel('Average CPU Utilization (%)')
+plt.legend(title='Scheduling Approach')
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / '05_cpu_vs_rate.png', dpi=400, bbox_inches='tight')
+plt.close()
 
-# 8 Heatmap: throughput
-pivot_tps = df.groupby(["config","data_rate"], as_index=False)["tps"].mean().pivot(index="config", columns="data_rate", values="tps")
-plt.figure(figsize=(10,5))
-sns.heatmap(pivot_tps, annot=True, fmt=".0f", cmap="YlGnBu")
-plt.title("Throughput Heatmap")
-plt.tight_layout(); plt.savefig("results/plots/08_throughput_heatmap.png"); plt.close()
+# ================== PLOT 6: Bar Chart at Max Rate (12,000 tps) ==================
+max_rate_df = df[df['Input_Rate'] == 12000].copy()
 
-# 9 Heatmap: p95 latency
-pivot_p95 = df.groupby(["config","data_rate"], as_index=False)["p95_ms"].mean().pivot(index="config", columns="data_rate", values="p95_ms")
-plt.figure(figsize=(10,5))
-sns.heatmap(pivot_p95, annot=True, fmt=".2f", cmap="YlOrRd")
-plt.title("P95 Latency Heatmap")
-plt.tight_layout(); plt.savefig("results/plots/09_p95_heatmap.png"); plt.close()
+plt.figure(figsize=(10, 6))
+sns.barplot(data=max_rate_df, x='Scheduler', y='Avg_Latency_ms', palette='Blues_d')
+plt.title('Average Latency at 12,000 tuples/sec')
+plt.ylabel('Avg Latency (ms)')
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / '06_bar_latency_at_12k.png', dpi=400, bbox_inches='tight')
+plt.close()
 
-# 10 Efficiency (tps/cpu) vs rate
-g = df.groupby(["config","data_rate"], as_index=False)["throughput_per_cpu"].mean()
-plt.figure(figsize=(12,6))
-sns.lineplot(data=g, x="data_rate", y="throughput_per_cpu", hue="config", marker="o")
-plt.title("Efficiency (TPS per CPU%) vs Data Rate")
-plt.tight_layout(); plt.savefig("results/plots/10_efficiency_tps_per_cpu.png"); plt.close()
+plt.figure(figsize=(10, 6))
+sns.barplot(data=max_rate_df, x='Scheduler', y='Throughput', palette='Greens_d')
+plt.title('Throughput at 12,000 tuples/sec')
+plt.ylabel('Throughput (tps)')
+plt.tight_layout()
+plt.savefig(OUTPUT_DIR / '07_bar_throughput_at_12k.png', dpi=400, bbox_inches='tight')
+plt.close()
 
-# 11 Throughput degradation curve
-g = df.groupby(["config","data_rate"], as_index=False)["throughput_degradation"].mean()
-plt.figure(figsize=(12,6))
-sns.lineplot(data=g, x="data_rate", y="throughput_degradation", hue="config", marker="o")
-plt.title("Throughput Degradation (%) vs Data Rate")
-plt.tight_layout(); plt.savefig("results/plots/11_throughput_degradation.png"); plt.close()
+# ================== PLOT 7: Combined Publication Figure ==================
+fig, axes = plt.subplots(2, 2, figsize=(16, 12))
+fig.suptitle('Performance Comparison of Basic, RA-Stream, and RA-Stream+FT',
+             fontsize=20, fontweight='bold', y=0.98)
 
-# 12 Pareto: latency vs throughput
-g = df.groupby(["config"], as_index=False).agg(avg_latency=("avg_ms","mean"), avg_tps=("tps","mean"))
-plt.figure(figsize=(8,6))
-sns.scatterplot(data=g, x="avg_latency", y="avg_tps", hue="config", s=120)
-for _,r in g.iterrows():
-    plt.text(r["avg_latency"], r["avg_tps"], " "+r["config"])
-plt.title("Pareto View: Latency vs Throughput")
-plt.tight_layout(); plt.savefig("results/plots/12_pareto_latency_throughput.png"); plt.close()
+sns.lineplot(ax=axes[0,0], data=df, x='Input_Rate', y='Avg_Latency_ms',
+             hue='Scheduler', marker='o')
+axes[0,0].set_title('Average Latency')
 
-# Summary table
-summary = df.groupby("config").agg(
-    mean_latency_ms=("avg_ms","mean"),
-    median_latency_ms=("avg_ms","median"),
-    std_latency_ms=("avg_ms","std"),
-    mean_p95_ms=("p95_ms","mean"),
-    mean_p99_ms=("p99_ms","mean"),
-    mean_tps=("tps","mean"),
-    std_tps=("tps","std"),
-    mean_cpu=("cpu","mean"),
-    mean_efficiency_tps_per_cpu=("throughput_per_cpu","mean")
-).reset_index()
-summary.to_csv("results/analysis/summary_comparison_table.csv", index=False)
+sns.lineplot(ax=axes[0,1], data=df, x='Input_Rate', y='Throughput',
+             hue='Scheduler', marker='o')
+axes[0,1].set_title('Throughput')
 
-# Improvement % vs EvenScheduler baseline
-if "EvenScheduler" in set(summary["config"]):
-    base = summary[summary["config"]=="EvenScheduler"].iloc[0]
-    imp = summary.copy()
-    imp["latency_improvement_%_vs_even"] = (base["mean_latency_ms"]-imp["mean_latency_ms"])/(base["mean_latency_ms"]+1e-9)*100
-    imp["throughput_improvement_%_vs_even"] = (imp["mean_tps"]-base["mean_tps"])/(base["mean_tps"]+1e-9)*100
-    imp.to_csv("results/analysis/improvement_vs_even_scheduler.csv", index=False)
+sns.lineplot(ax=axes[1,0], data=df, x='Input_Rate', y='CPU_Util',
+             hue='Scheduler', marker='o')
+axes[1,0].set_title('CPU Utilization (%)')
 
-# t-tests pairwise latency
-configs = sorted(df["config"].unique())
-rows = []
-for i in range(len(configs)):
-    for j in range(i+1, len(configs)):
-        a = df[df["config"]==configs[i]]["avg_ms"].dropna()
-        b = df[df["config"]==configs[j]]["avg_ms"].dropna()
-        if len(a)>1 and len(b)>1:
-            t,p = stats.ttest_ind(a,b,equal_var=False)
-            rows.append([configs[i],configs[j],t,p])
-pd.DataFrame(rows, columns=["config_a","config_b","t_stat","p_value"]).to_csv(
-    "results/analysis/pairwise_ttest_latency.csv", index=False
-)
+sns.lineplot(ax=axes[1,1], data=df, x='Input_Rate', y='Efficiency',
+             hue='Scheduler', marker='o')
+axes[1,1].set_title('Throughput Efficiency (%)')
 
-print("Done. Generated extensive plots + analysis.")
+plt.tight_layout(rect=[0, 0, 1, 0.95])
+plt.savefig(OUTPUT_DIR / '08_combined_performance.png', dpi=400, bbox_inches='tight')
+plt.close()
+
+print("\nAll plots generated successfully!")
+print(f"Plots saved in: {OUTPUT_DIR.resolve()}")
+print("\nRecommended plots for your paper:")
+print("1. 08_combined_performance.png          → Main result figure")
+print("2. 01_avg_latency_vs_rate.png          → Latency comparison")
+print("3. 03_throughput_vs_rate.png           → Throughput scaling")
+print("4. 06_bar_latency_at_12k.png           → Highlight at peak load")
+print("5. 07_bar_throughput_at_12k.png        → Throughput at peak load")

@@ -1,11 +1,10 @@
 package com.rastream.faulttolerance;
 
-import java.util.Map;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
 
 public class FailureDetector {
-    private final Map<String, Long> heartbeats = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<String, Long> heartbeats = new ConcurrentHashMap<>();
     private final ScheduledExecutorService ses = Executors.newSingleThreadScheduledExecutor();
     private final long timeoutMs;
     private final Consumer<String> onNodeFailure;
@@ -19,17 +18,21 @@ public class FailureDetector {
         ses.scheduleAtFixedRate(this::check, checkIntervalMs, checkIntervalMs, TimeUnit.MILLISECONDS);
     }
 
-    public void stop() { ses.shutdownNow(); }
+    public void stop() {
+        ses.shutdownNow();
+    }
 
-    public void heartbeat(String workerId) { heartbeats.put(workerId, System.currentTimeMillis()); }
+    public void heartbeat(String workerId) {
+        heartbeats.put(workerId, System.currentTimeMillis());
+    }
 
     private void check() {
         long now = System.currentTimeMillis();
-        for (var e : heartbeats.entrySet()) {
-            if (now - e.getValue() > timeoutMs) {
-                onNodeFailure.accept(e.getKey());
-                heartbeats.remove(e.getKey());
+        heartbeats.forEach((worker, lastBeat) -> {
+            if (now - lastBeat > timeoutMs) {
+                onNodeFailure.accept(worker);
+                heartbeats.remove(worker);
             }
-        }
+        });
     }
 }

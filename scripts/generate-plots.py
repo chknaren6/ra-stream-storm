@@ -1,94 +1,136 @@
-import glob, os, pandas as pd, seaborn as sns, matplotlib.pyplot as plt
-from scipy import stats
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+from pathlib import Path
+import warnings
+warnings.filterwarnings("ignore")
 
-os.makedirs("results/plots", exist_ok=True)
-os.makedirs("results/analysis", exist_ok=True)
+sns.set_style("whitegrid")
+plt.rcParams['figure.figsize'] = (14, 9)
+plt.rcParams['font.size'] = 14
+plt.rcParams['axes.titlesize'] = 18
+plt.rcParams['axes.labelsize'] = 16
 
-files = glob.glob("results/raw-data/*.csv")
-if not files:
-    print("No CSV files found in results/raw-data")
-    raise SystemExit(0)
+OUTPUT_DIR = Path("../results/plots")
+OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
-df = pd.concat([pd.read_csv(f) for f in files], ignore_index=True)
+CSV_PATH = "/home/karthik_hadoop/ra-stream-metrics/local/taxi/metrics.csv"
 
-required = {"time_sec","config","data_rate","avg_ms","tps","cpu"}
-missing = required - set(df.columns)
-if missing:
-    print(f"Missing required columns: {missing}")
-    print("Available columns:", list(df.columns))
-    raise SystemExit(1)
+df = pd.read_csv(CSV_PATH)
 
-# Latency vs Time
-plt.figure(figsize=(12,6))
-sns.lineplot(data=df, x="time_sec", y="avg_ms", hue="config", estimator="mean", errorbar=None)
-plt.title("Latency vs Time (all schedulers)")
-plt.tight_layout()
-plt.savefig("results/plots/latency_vs_time.png")
+# Clean column names
+df = df.rename(columns={
+    'stream_rate_tps': 'Input_Rate',
+    'avg_latency_ms': 'Avg_Latency_ms',
+    'max_latency_ms': 'Max_Latency_ms',
+    'throughput_tps': 'Throughput',
+    'avg_cpu_pct': 'CPU_Util',
+    'avg_mem_pct': 'Mem_Util'
+})
+
+# Nice labels
+scheduler_map = {
+    "Round Robin": "Basic (Round Robin)",
+    "RaStream": "RA-Stream",
+    "RaStreamFT": "RA-Stream + FT"
+}
+df['Scheduler'] = df['scheduler'].map(scheduler_map)
+
+print(f"Loaded {len(df)} records from metrics.csv")
+
+# ================== PLOTS ==================
+
+# 1. Average Latency vs Input Rate
+plt.figure()
+sns.lineplot(data=df, x='Input_Rate', y='Avg_Latency_ms', hue='Scheduler', 
+             style='Scheduler', markers=True, linewidth=3, markersize=8)
+plt.title('Average Latency vs Input Rate')
+plt.xlabel('Input Rate (tuples/sec)')
+plt.ylabel('Average Latency (ms)')
+plt.legend(title='Scheduler')
+plt.savefig(OUTPUT_DIR / '01_avg_latency_vs_rate.png', dpi=400, bbox_inches='tight')
 plt.close()
 
-# Throughput vs Data Rate
-g = df.groupby(["config","data_rate"], as_index=False)["tps"].mean()
-plt.figure(figsize=(12,6))
-sns.lineplot(data=g, x="data_rate", y="tps", hue="config", marker="o")
-plt.title("Throughput vs Data Rate (all schedulers)")
-plt.tight_layout()
-plt.savefig("results/plots/throughput_vs_data_rate.png")
+# 2. Max Latency vs Input Rate
+plt.figure()
+sns.lineplot(data=df, x='Input_Rate', y='Max_Latency_ms', hue='Scheduler', 
+             style='Scheduler', markers=True, linewidth=3)
+plt.title('Maximum Latency vs Input Rate')
+plt.xlabel('Input Rate (tuples/sec)')
+plt.ylabel('Max Latency (ms)')
+plt.legend(title='Scheduler')
+plt.savefig(OUTPUT_DIR / '02_max_latency_vs_rate.png', dpi=400, bbox_inches='tight')
 plt.close()
 
-# Resource Utilization vs Time
-plt.figure(figsize=(12,6))
-sns.lineplot(data=df, x="time_sec", y="cpu", hue="config", estimator="mean", errorbar=None)
-plt.title("Resource Utilization (CPU) vs Time")
-plt.tight_layout()
-plt.savefig("results/plots/resource_utilization_vs_time.png")
+# 3. Throughput vs Input Rate
+plt.figure()
+sns.lineplot(data=df, x='Input_Rate', y='Throughput', hue='Scheduler', 
+             style='Scheduler', markers=True, linewidth=3)
+plt.title('Achieved Throughput vs Input Rate')
+plt.xlabel('Input Rate (tuples/sec)')
+plt.ylabel('Throughput (tuples/sec)')
+plt.legend(title='Scheduler')
+plt.savefig(OUTPUT_DIR / '03_throughput_vs_rate.png', dpi=400, bbox_inches='tight')
 plt.close()
 
-# Latency Distribution boxplot
-plt.figure(figsize=(12,6))
-sns.boxplot(data=df, x="config", y="avg_ms")
-plt.xticks(rotation=20)
-plt.title("Latency Distribution (boxplot)")
-plt.tight_layout()
-plt.savefig("results/plots/latency_distribution_boxplot.png")
+# 4. Latency Boxplot at High Load (very insightful for paper)
+high_rate = df[df['Input_Rate'] >= 8000]
+plt.figure(figsize=(10, 6))
+sns.boxplot(data=high_rate, x='Scheduler', y='Avg_Latency_ms', palette="Blues")
+plt.title('Latency Distribution at High Load (≥ 8000 tps)')
+plt.ylabel('Average Latency (ms)')
+plt.savefig(OUTPUT_DIR / '04_latency_boxplot_high_load.png', dpi=400, bbox_inches='tight')
 plt.close()
 
-# Overhead analysis FT vs non-FT (if both present)
-if {"RaStream", "RaStreamFT"}.issubset(set(df["config"].unique())):
-    base = df[df["config"]=="RaStream"]["avg_ms"].mean()
-    ft   = df[df["config"]=="RaStreamFT"]["avg_ms"].mean()
-    overhead_pct = ((ft - base) / base * 100.0) if base else float("nan")
-    with open("results/analysis/overhead_analysis.txt","w") as f:
-        f.write(f"RaStream avg latency: {base:.6f} ms\n")
-        f.write(f"RaStreamFT avg latency: {ft:.6f} ms\n")
-        f.write(f"Latency overhead (%): {overhead_pct:.4f}\n")
+# 5. Performance Improvement % over Basic (Round Robin)
+baseline = df[df['scheduler'] == "Round Robin"].set_index('Input_Rate')
+df['Latency_Improvement'] = df.apply(
+    lambda row: ((baseline.loc[row['Input_Rate'], 'Avg_Latency_ms'] - row['Avg_Latency_ms']) /
+                 baseline.loc[row['Input_Rate'], 'Avg_Latency_ms']) * 100, axis=1)
 
-# Summary table
-summary = df.groupby("config").agg(
-    mean_latency_ms=("avg_ms","mean"),
-    median_latency_ms=("avg_ms","median"),
-    std_latency_ms=("avg_ms","std"),
-    mean_tps=("tps","mean"),
-    mean_cpu=("cpu","mean")
-).reset_index()
-summary.to_csv("results/analysis/summary_comparison_table.csv", index=False)
+plt.figure()
+sns.barplot(data=df[df['Input_Rate'] == 12000], x='Scheduler', y='Latency_Improvement', palette="viridis")
+plt.title('Latency Improvement over Basic Scheduler at 12,000 tps')
+plt.ylabel('Latency Reduction (%)')
+plt.savefig(OUTPUT_DIR / '05_latency_improvement_bar.png', dpi=400, bbox_inches='tight')
+plt.close()
 
-# Resource usage table
-resource_tbl = df.groupby("config").agg(
-    mean_cpu=("cpu","mean"),
-    max_cpu=("cpu","max")
-).reset_index()
-resource_tbl.to_csv("results/analysis/resource_usage_table.csv", index=False)
+# 6. Throughput Efficiency
+df['Efficiency'] = (df['Throughput'] / df['Input_Rate']) * 100
+plt.figure()
+sns.lineplot(data=df, x='Input_Rate', y='Efficiency', hue='Scheduler', 
+             style='Scheduler', markers=True, linewidth=3)
+plt.title('Throughput Efficiency (%)')
+plt.xlabel('Input Rate (tuples/sec)')
+plt.ylabel('Efficiency (%)')
+plt.savefig(OUTPUT_DIR / '06_efficiency_vs_rate.png', dpi=400, bbox_inches='tight')
+plt.close()
 
-# Simple t-test first two configs
-cfgs = sorted(df["config"].dropna().unique())
-if len(cfgs) >= 2:
-    a = df[df["config"] == cfgs[0]]["avg_ms"].dropna()
-    b = df[df["config"] == cfgs[1]]["avg_ms"].dropna()
-    if len(a) > 1 and len(b) > 1:
-        t, p = stats.ttest_ind(a, b, equal_var=False)
-        with open("results/analysis/t_test_latency.txt","w") as f:
-            f.write(f"{cfgs[0]} vs {cfgs[1]} latency t-test\n")
-            f.write(f"t_stat={t}\n")
-            f.write(f"p_value={p}\n")
+# 7. Combined Publication Figure (the most important one)
+fig, axes = plt.subplots(2, 2, figsize=(18, 12))
+fig.suptitle('RA-Stream vs Basic Scheduler: Performance Evaluation', fontsize=22, fontweight='bold')
 
-print("Generated plots and analysis in results/plots and results/analysis")
+sns.lineplot(ax=axes[0,0], data=df, x='Input_Rate', y='Avg_Latency_ms', hue='Scheduler', marker='o')
+axes[0,0].set_title('Average Latency')
+
+sns.lineplot(ax=axes[0,1], data=df, x='Input_Rate', y='Throughput', hue='Scheduler', marker='o')
+axes[0,1].set_title('Throughput')
+
+sns.lineplot(ax=axes[1,0], data=df, x='Input_Rate', y='CPU_Util', hue='Scheduler', marker='o')
+axes[1,0].set_title('CPU Utilization (%)')
+
+sns.lineplot(ax=axes[1,1], data=df, x='Input_Rate', y='Efficiency', hue='Scheduler', marker='o')
+axes[1,1].set_title('Throughput Efficiency (%)')
+
+plt.tight_layout(rect=[0, 0, 1, 0.95])
+plt.savefig(OUTPUT_DIR / '07_combined_performance_paper.png', dpi=500, bbox_inches='tight')
+plt.close()
+
+print("\n All plots generated successfully!")
+print(f"Location: {OUTPUT_DIR.resolve()}")
+print("\nKey plots for your paper:")
+print("• 07_combined_performance_paper.png     → Main results figure")
+print("• 01_avg_latency_vs_rate.png           → Core latency result")
+print("• 03_throughput_vs_rate.png            → Throughput scaling")
+print("• 04_latency_boxplot_high_load.png     → Variance at high load")
+print("• 05_latency_improvement_bar.png       → Quantified improvement")
